@@ -8,6 +8,32 @@
       name="description"
       content="ugrant is a portable OAuth 2.0 token broker and exec wrapper for local tools, scripts, and shell workflows."
     />
+    <link rel="canonical" href="https://www.ugrant.sh/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="ugrant" />
+    <meta property="og:title" content="ugrant, portable OAuth grants for CLIs" />
+    <meta
+      property="og:description"
+      content="Secure local token custody, refresh, and env injection for scripts, shell tools, and CLIs."
+    />
+    <meta property="og:url" content="https://www.ugrant.sh/" />
+    <meta property="og:image" content="https://www.ugrant.sh/hero-hugh-grant.jpg" />
+    <meta
+      property="og:image:alt"
+      content="A comedic, Hugh Grant-inspired illustration handing out glowing access grants."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="ugrant, portable OAuth grants for CLIs" />
+    <meta
+      name="twitter:description"
+      content="Secure local token custody, refresh, and env injection for scripts, shell tools, and CLIs."
+    />
+    <meta name="twitter:image" content="https://www.ugrant.sh/hero-hugh-grant.jpg" />
+    <meta
+      name="twitter:image:alt"
+      content="A comedic, Hugh Grant-inspired illustration handing out glowing access grants."
+    />
+    <meta name="theme-color" content="#f8f6f1" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -31,12 +57,12 @@
               <strong>ugrant</strong> is a small local token broker for scripts, shell tools, and CLIs that need OAuth without becoming their own credential manager.
             </p>
             <p class="sublede">
-              Secure local token custody, refresh, and env injection, with one install command and no daemon required for the MVP.
+              Secure local token custody, refresh, and env injection, with a checksum-verifying install script and no daemon required for the MVP.
             </p>
 
             <div class="install-callout" id="install">
               <p class="install-label">Install</p>
-              <pre><code>curl -fsSL https://www.ugrant.sh/install.sh | sh</code></pre>
+              <pre><code>curl -fsSLo /tmp/ugrant-install.sh https://www.ugrant.sh/install.sh && sh /tmp/ugrant-install.sh</code></pre>
             </div>
 
             <div class="hero-actions">
