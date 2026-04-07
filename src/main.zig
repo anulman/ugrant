@@ -2775,7 +2775,9 @@ test "rekey can switch from insecure-keyfile to resolved platform-secure-store b
     defer vault.deinit(allocator);
 
     const target_backend = try resolveBackendChoice("platform-secure-store", false, true, true);
-    const stats = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", target_backend, "tpm2-test-secret", null, "dHBtMi1wdWI=", "dHBtMi1wcml2");
+    const target_tpm2_pub: ?[]const u8 = if (std.mem.eql(u8, target_backend, "tpm2")) "dHBtMi1wdWI=" else null;
+    const target_tpm2_priv: ?[]const u8 = if (std.mem.eql(u8, target_backend, "tpm2")) "dHBtMi1wcml2" else null;
+    const stats = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", target_backend, "tpm2-test-secret", null, target_tpm2_pub, target_tpm2_priv);
     try std.testing.expectEqual(@as(u32, 2), stats.key_version);
 
     const updated_record = try loadWrappedDek(allocator, vault.keys_path);
