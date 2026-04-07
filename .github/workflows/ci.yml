@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -15,10 +18,12 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@53fc45b17fe98b52f92ee5ea08ff48a85a3e7eb7 # v1
         with:
           version: 0.15.2
 
@@ -29,7 +34,7 @@ jobs:
           sudo apt-get install -y libsqlite3-dev
 
       - name: Check formatting
-        run: zig fmt --check src/main.zig build.zig
+        run: zig fmt --check src/*.zig build.zig
 
       - name: Run tests
         run: zig test src/main.zig -lc -lsqlite3

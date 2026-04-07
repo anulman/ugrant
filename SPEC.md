@@ -102,7 +102,7 @@ And the persisted backend may be the concrete backend that was actually used
 Given TPM2 and platform secure store are unavailable
 When I run `ugrant init`
 Then it falls back to passphrase wrapping
-And it uses SHA-256-derived wrapping material
+And it uses Argon2id-derived wrapping material
 And it wraps the DEK with AES-256-GCM
 And it marks insecure keyfile mode as degraded when explicitly selected
 
@@ -187,8 +187,14 @@ Given I have a profile configured for Authorization Code + PKCE
 When I run `ugrant login --profile watcher`
 Then `ugrant` prints an authorization URL
 And it can accept a pasted redirect URL
-Or it can accept a pasted final code
+And it validates the pasted OAuth `state` before exchanging the code
 And on success it stores refreshable credentials for the subject
+
+### Scenario: bare auth-code fallback is explicit and degraded
+Given I have a profile configured for Authorization Code + PKCE
+When I run `ugrant login --profile watcher --unsafe-bare-code`
+Then `ugrant` may accept a pasted final code without the full redirect URL
+And it treats that path as explicitly unsafe because it cannot validate OAuth `state`
 
 ### Scenario: login can use a localhost callback when available
 Given the provider permits localhost redirect callbacks
@@ -293,7 +299,7 @@ And waiting callers observe the failure and exit cleanly instead of spinning for
 Given `ugrant` is initialized
 When I run `ugrant doctor`
 Then it verifies config paths
-And it verifies DB permissions
+And it verifies secret-state permissions
 And it verifies the active DEK can be unwrapped
 And it verifies schema and indexes
 And it never prints secret values

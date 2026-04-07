@@ -52,6 +52,8 @@ pub const profile_usage_text =
     "usage: ugrant profile add --name <name> [--service <preset> | --discover <issuer-or-url>] [--provider <provider>] [--auth-url <url>] [--token-url <url>] --client-id <id> [--scope <scope>] [--env-kind <kind>] [--redirect-uri <uri>] [--base-url <url>] [--model <model>] [--audience <aud>] [--client-secret <secret>]\n" ++
     "usage: ugrant profile list\n";
 
+pub const login_usage_text =
+    "usage: ugrant login --profile <name> [--redirect-url <url>] [--unsafe-bare-code [--code <code>]] [--no-open]\n";
 pub const env_usage_text = "usage: ugrant env --profile <name> [--format shell|json]\n";
 pub const exec_usage_text = "usage: ugrant exec --profile <name> -- <cmd> [args...]\n";
 pub const revoke_usage_text = "usage: ugrant revoke --profile <name>\n";
@@ -63,6 +65,7 @@ pub const doctor_usage_text = "usage: ugrant doctor\n";
 test "usage strings include new profile list and subcommand help" {
     try std.testing.expect(std.mem.indexOf(u8, usage_text, "profile list") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile_usage_text, "usage: ugrant profile list") != null);
+    try std.testing.expect(std.mem.eql(u8, login_usage_text, "usage: ugrant login --profile <name> [--redirect-url <url>] [--unsafe-bare-code [--code <code>]] [--no-open]\n"));
     try std.testing.expect(std.mem.eql(u8, env_usage_text, "usage: ugrant env --profile <name> [--format shell|json]\n"));
     try std.testing.expect(std.mem.eql(u8, exec_usage_text, "usage: ugrant exec --profile <name> -- <cmd> [args...]\n"));
     try std.testing.expect(std.mem.eql(u8, revoke_usage_text, "usage: ugrant revoke --profile <name>\n"));

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const crypto = std.crypto;
 const cli = @import("cli.zig");
 const pathing = @import("paths.zig");
@@ -12,6 +13,7 @@ const c = @cImport({
 const version = cli.version;
 const usage_text = cli.usage_text;
 const profile_usage_text = cli.profile_usage_text;
+const login_usage_text = cli.login_usage_text;
 const env_usage_text = cli.env_usage_text;
 const exec_usage_text = cli.exec_usage_text;
 const revoke_usage_text = cli.revoke_usage_text;
@@ -26,9 +28,9 @@ const kdf_salt_len = 16;
 const dek_len = 32;
 const gcm_nonce_len = 12;
 const gcm_tag_len = 16;
-const kdf_opslimit = 3;
-const kdf_memlimit = 1 << 18;
-const schema_version = 2;
+const argon2_params = crypto.pwhash.argon2.Params.owasp_2id;
+const argon2_kdf_name = "argon2id-v19";
+const schema_version = 3;
 
 const WrappedDekRecord = struct {
     version: u32,
@@ -38,6 +40,10 @@ const WrappedDekRecord = struct {
     nonce_b64: []const u8,
     ciphertext_b64: []const u8,
     created_at: []const u8,
+    kdf: ?[]const u8 = null,
+    kdf_t: ?u32 = null,
+    kdf_m: ?u32 = null,
+    kdf_p: ?u32 = null,
     secret_ref: ?[]const u8 = null,
     tpm2_pub_b64: ?[]const u8 = null,
     tpm2_priv_b64: ?[]const u8 = null,
@@ -208,6 +214,7 @@ fn cmdInit(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.
     const db = try openDb(paths.db_path);
     defer _ = c.sqlite3_close(db);
     try ensureSchema(db);
+    try tightenSecretStatePermissions(paths);
 
     try out.print("initialized: yes\nbackend: {s}\nkeys: {s}\ndb: {s}\n", .{ wrapped.backend, paths.keys_path, paths.db_path });
 }
@@ -399,6 +406,7 @@ fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     var code_override: ?[]const u8 = null;
     var redirect_override: ?[]const u8 = null;
     var no_open = false;
+    var allow_unsafe_bare_code = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
@@ -411,13 +419,22 @@ fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
         } else if (std.mem.eql(u8, arg, "--redirect-url")) {
             i += 1;
             redirect_override = args[i];
+        } else if (std.mem.eql(u8, arg, "--unsafe-bare-code")) {
+            allow_unsafe_bare_code = true;
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            try out.writeAll(login_usage_text);
+            return;
         } else if (std.mem.eql(u8, arg, "--no-open")) no_open = true else {
             try err.print("unknown option: {s}\n", .{arg});
             std.process.exit(2);
         }
     }
     if (profile_name == null) {
-        try err.writeAll("usage: ugrant login --profile <name> [--code <code>] [--redirect-url <url>] [--no-open]\n");
+        try err.writeAll(login_usage_text);
+        std.process.exit(2);
+    }
+    if (code_override != null and !allow_unsafe_bare_code) {
+        try err.writeAll("ugrant login: bare auth codes skip OAuth state validation, rerun with --unsafe-bare-code if you must use --code\n");
         std.process.exit(2);
     }
 
@@ -448,10 +465,16 @@ fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
         try maybeOpenUrl(auth_url);
     }
 
-    var final_code = code_override;
+    var final_code: ?[]u8 = if (code_override) |v| try allocator.dupe(u8, v) else null;
     if (final_code == null) {
         if (redirect_override) |redirect_url| {
-            final_code = try extractCodeFromRedirect(allocator, redirect_url);
+            final_code = extractCodeFromRedirect(allocator, redirect_url, oauth_state) catch |e| switch (e) {
+                error.InvalidOAuthState => {
+                    try err.writeAll("ugrant login: pasted redirect URL had the wrong OAuth state, restart login and try again\n");
+                    std.process.exit(1);
+                },
+                else => return e,
+            };
         }
     }
     if (final_code == null and isLoopbackRedirect(profile.redirect_uri)) {
@@ -459,21 +482,29 @@ fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
         if (final_code != null) try out.writeAll("localhost callback received\n");
     }
     if (final_code == null) {
-        try out.writeAll("Paste redirect URL or final code: ");
-        try out.flush();
-        const pasted = try promptSecret(allocator, "");
-        defer allocator.free(pasted);
-        if (std.mem.indexOf(u8, pasted, "://") != null or std.mem.indexOf(u8, pasted, "code=") != null) {
-            final_code = try extractCodeFromRedirect(allocator, pasted);
+        if (allow_unsafe_bare_code) {
+            try out.writeAll("Paste redirect URL or final code: ");
         } else {
-            final_code = try allocator.dupe(u8, std.mem.trim(u8, pasted, " \r\n\t"));
+            try out.writeAll("Paste full redirect URL (or rerun with --unsafe-bare-code to allow a bare auth code): ");
         }
+        try out.flush();
+        const pasted = try promptLine(allocator, "");
+        defer freeSecret(allocator, pasted);
+        final_code = resolveManualCodeInput(allocator, pasted, oauth_state, allow_unsafe_bare_code) catch |e| switch (e) {
+            error.InvalidOAuthState => {
+                try err.writeAll("ugrant login: pasted redirect URL had the wrong OAuth state, restart login and try again\n");
+                std.process.exit(1);
+            },
+            error.UnsafeBareCodeRequiresFlag => {
+                try err.writeAll("ugrant login: bare auth codes skip OAuth state validation, rerun with --unsafe-bare-code if you must use one\n");
+                std.process.exit(2);
+            },
+            else => return e,
+        };
     } else if (redirect_override != null) {
         // already allocated by extractCodeFromRedirect
-    } else if (code_override != null) {
-        final_code = try allocator.dupe(u8, code_override.?);
     }
-    defer if (final_code) |v| allocator.free(v);
+    defer if (final_code) |v| freeSecret(allocator, v);
 
     const token_resp = try exchangeToken(allocator, profile, final_code.?, verifier);
     defer freeTokenResponse(allocator, token_resp);
@@ -685,7 +716,7 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     defer freeWrappedDekRecord(allocator, wrapped);
 
     const current_wrap_secret = try wrapSecretForBackend(allocator, wrapped.backend, "Current ugrant passphrase: ", paths.keys_path, wrapped);
-    defer allocator.free(current_wrap_secret.secret);
+    defer freeSecret(allocator, current_wrap_secret.secret);
 
     var target_backend: []const u8 = wrapped.backend;
     var target_wrap: WrapSecret = undefined;
@@ -713,11 +744,12 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     } else {
         target_wrap = try wrapSecretForBackend(allocator, wrapped.backend, "", paths.keys_path, null);
     }
-    defer allocator.free(target_wrap.secret);
+    defer freeSecret(allocator, target_wrap.secret);
 
     const db = try openDb(paths.db_path);
     defer _ = c.sqlite3_close(db);
     const stats = try performRekey(allocator, db, paths.keys_path, wrapped, current_wrap_secret.secret, target_backend, target_wrap.secret, target_wrap.secret_ref, target_wrap.tpm2_pub_b64, target_wrap.tpm2_priv_b64);
+    try tightenSecretStatePermissions(paths);
     try out.print(
         "rekey: ok\nbackend: {s}\nprevious_backend: {s}\nkey_version: {}\nprofiles_rewritten: {}\ngrants_rewritten: {}\n",
         .{ target_backend, wrapped.backend, stats.key_version, stats.profiles_rewritten, stats.grants_rewritten },
@@ -816,7 +848,8 @@ fn cmdDoctor(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
     const db = try openDb(paths.db_path);
     defer _ = c.sqlite3_close(db);
     try ensureSchema(db);
-    try out.print("backend: {s}\ndek_unwrap: ok\nschema: ok\n", .{wrapped.backend});
+    try tightenSecretStatePermissions(paths);
+    try out.print("backend: {s}\ndek_unwrap: ok\nschema: ok\npermissions: ok\n", .{wrapped.backend});
 }
 
 const TokenResponse = struct {
@@ -840,6 +873,10 @@ fn ensureParentDirs(paths: Paths) !void {
 
 fn ensureConfig(config_path: []const u8) !void {
     return pathing.ensureConfig(config_path);
+}
+
+fn tightenSecretStatePermissions(paths: Paths) !void {
+    return pathing.tightenSecretStatePermissions(paths);
 }
 
 fn requireInitialized(paths: Paths) !void {
@@ -879,7 +916,7 @@ fn initOrLoadKeys(allocator: std.mem.Allocator, keys_path: []const u8, requested
 
     const backend = try chooseInitBackend(allocator, requested_backend, allow_insecure);
     const wrap_secret = try wrapSecretForBackend(allocator, backend, "Create passphrase for ugrant: ", keys_path, null);
-    defer allocator.free(wrap_secret.secret);
+    defer freeSecret(allocator, wrap_secret.secret);
 
     var dek: [dek_len]u8 = undefined;
     crypto.random.bytes(&dek);
@@ -902,7 +939,7 @@ fn wrapDekForBackend(allocator: std.mem.Allocator, backend: []const u8, key_vers
     crypto.random.bytes(&salt);
     crypto.random.bytes(&nonce);
     var key: [dek_len]u8 = undefined;
-    deriveWrapKey(&key, passphrase, &salt);
+    try deriveWrapKeyArgon2id(allocator, &key, passphrase, &salt, argon2_params);
     var ct: [dek_len]u8 = undefined;
     var tag: [gcm_tag_len]u8 = undefined;
     crypto.aead.aes_gcm.Aes256Gcm.encrypt(&ct, &tag, dek, "ugrant-dek-wrap", nonce, key);
@@ -918,6 +955,10 @@ fn wrapDekForBackend(allocator: std.mem.Allocator, backend: []const u8, key_vers
         .nonce_b64 = try b64EncodeAlloc(allocator, &nonce),
         .ciphertext_b64 = try b64EncodeAlloc(allocator, combined),
         .created_at = try std.fmt.allocPrint(allocator, "{}", .{nowTs()}),
+        .kdf = try allocator.dupe(u8, argon2_kdf_name),
+        .kdf_t = argon2_params.t,
+        .kdf_m = argon2_params.m,
+        .kdf_p = argon2_params.p,
         .secret_ref = if (secret_ref) |v| try allocator.dupe(u8, v) else null,
         .tpm2_pub_b64 = if (tpm2_pub_b64) |v| try allocator.dupe(u8, v) else null,
         .tpm2_priv_b64 = if (tpm2_priv_b64) |v| try allocator.dupe(u8, v) else null,
@@ -926,7 +967,7 @@ fn wrapDekForBackend(allocator: std.mem.Allocator, backend: []const u8, key_vers
 
 fn unwrapDek(allocator: std.mem.Allocator, record: WrappedDekRecord) ![]u8 {
     const passphrase = try wrapSecretForBackend(allocator, record.backend, "Unlock ugrant passphrase: ", null, record);
-    defer allocator.free(passphrase.secret);
+    defer freeSecret(allocator, passphrase.secret);
 
     return unwrapDekWithSecret(allocator, record, passphrase.secret);
 }
@@ -941,31 +982,48 @@ fn wrapSecretForBackend(allocator: std.mem.Allocator, backend: []const u8, promp
 
 fn unwrapDekWithSecret(allocator: std.mem.Allocator, record: WrappedDekRecord, passphrase: []const u8) ![]u8 {
     const salt = try b64DecodeAlloc(allocator, record.salt_b64);
-    defer allocator.free(salt);
+    defer freeSecret(allocator, salt);
     const nonce = try b64DecodeAlloc(allocator, record.nonce_b64);
-    defer allocator.free(nonce);
+    defer freeSecret(allocator, nonce);
     const ciphertext = try b64DecodeAlloc(allocator, record.ciphertext_b64);
-    defer allocator.free(ciphertext);
+    defer freeSecret(allocator, ciphertext);
     if (ciphertext.len != dek_len + gcm_tag_len) return error.InvalidWrappedDek;
     var key: [dek_len]u8 = undefined;
-    deriveWrapKey(&key, passphrase, salt);
+    try deriveWrapKeyForRecord(allocator, &key, passphrase, salt, record);
     var out: [dek_len]u8 = undefined;
     const tag: [gcm_tag_len]u8 = ciphertext[dek_len..][0..gcm_tag_len].*;
     crypto.aead.aes_gcm.Aes256Gcm.decrypt(&out, ciphertext[0..dek_len], tag, "ugrant-dek-wrap", nonce[0..gcm_nonce_len].*, key) catch return error.InvalidPassphrase;
     return allocator.dupe(u8, &out);
 }
 
-fn deriveWrapKey(out: *[dek_len]u8, passphrase: []const u8, salt: []const u8) void {
+fn deriveLegacyWrapKey(out: *[dek_len]u8, passphrase: []const u8, salt: []const u8) void {
     var h = crypto.hash.sha2.Sha256.init(.{});
     h.update(passphrase);
     h.update(salt);
     h.final(out);
 }
 
+fn deriveWrapKeyArgon2id(allocator: std.mem.Allocator, out: *[dek_len]u8, passphrase: []const u8, salt: []const u8, params: crypto.pwhash.argon2.Params) !void {
+    try crypto.pwhash.argon2.kdf(allocator, out, passphrase, salt, params, .argon2id);
+}
+
+fn deriveWrapKeyForRecord(allocator: std.mem.Allocator, out: *[dek_len]u8, passphrase: []const u8, salt: []const u8, record: WrappedDekRecord) !void {
+    if (record.kdf) |kdf_name| {
+        if (!std.mem.eql(u8, kdf_name, argon2_kdf_name)) return error.UnsupportedWrapKdf;
+        return deriveWrapKeyArgon2id(allocator, out, passphrase, salt, .{
+            .t = record.kdf_t orelse argon2_params.t,
+            .m = record.kdf_m orelse argon2_params.m,
+            .p = @as(u24, @intCast(record.kdf_p orelse argon2_params.p)),
+        });
+    }
+    deriveLegacyWrapKey(out, passphrase, salt);
+}
+
 fn saveWrappedDek(keys_path: []const u8, record: WrappedDekRecord) !void {
     var list = std.ArrayList(u8){};
     defer list.deinit(std.heap.page_allocator);
     try list.writer(std.heap.page_allocator).print("{{\"version\":{},\"backend\":\"{s}\",\"key_version\":{},\"salt_b64\":\"{s}\",\"nonce_b64\":\"{s}\",\"ciphertext_b64\":\"{s}\",\"created_at\":\"{s}\"", .{ record.version, record.backend, record.key_version, record.salt_b64, record.nonce_b64, record.ciphertext_b64, record.created_at });
+    if (record.kdf) |v| try list.writer(std.heap.page_allocator).print(",\"kdf\":\"{s}\",\"kdf_t\":{},\"kdf_m\":{},\"kdf_p\":{}", .{ v, record.kdf_t.?, record.kdf_m.?, record.kdf_p.? });
     if (record.secret_ref) |v| try list.writer(std.heap.page_allocator).print(",\"secret_ref\":\"{s}\"", .{v});
     if (record.tpm2_pub_b64) |v| try list.writer(std.heap.page_allocator).print(",\"tpm2_pub_b64\":\"{s}\"", .{v});
     if (record.tpm2_priv_b64) |v| try list.writer(std.heap.page_allocator).print(",\"tpm2_priv_b64\":\"{s}\"", .{v});
@@ -975,11 +1033,16 @@ fn saveWrappedDek(keys_path: []const u8, record: WrappedDekRecord) !void {
     const tmp_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}.tmp", .{keys_path});
     defer std.heap.page_allocator.free(tmp_path);
     {
-        var file = try std.fs.createFileAbsolute(tmp_path, .{ .truncate = true });
+        var file = try std.fs.createFileAbsolute(tmp_path, .{ .truncate = true, .mode = pathing.secret_file_mode });
         defer file.close();
         try file.writeAll(rendered);
     }
     try std.fs.renameAbsolute(tmp_path, keys_path);
+    if (builtin.os.tag != .windows) {
+        var file = try std.fs.openFileAbsolute(keys_path, .{});
+        defer file.close();
+        try file.chmod(pathing.secret_file_mode);
+    }
 }
 
 fn loadWrappedDek(allocator: std.mem.Allocator, keys_path: []const u8) !WrappedDekRecord {
@@ -996,6 +1059,10 @@ fn loadWrappedDek(allocator: std.mem.Allocator, keys_path: []const u8) !WrappedD
         .nonce_b64 = try allocator.dupe(u8, obj.get("nonce_b64").?.string),
         .ciphertext_b64 = try allocator.dupe(u8, obj.get("ciphertext_b64").?.string),
         .created_at = try allocator.dupe(u8, obj.get("created_at").?.string),
+        .kdf = if (obj.get("kdf")) |v| try allocator.dupe(u8, v.string) else null,
+        .kdf_t = if (obj.get("kdf_t")) |v| @as(u32, @intCast(v.integer)) else null,
+        .kdf_m = if (obj.get("kdf_m")) |v| @as(u32, @intCast(v.integer)) else null,
+        .kdf_p = if (obj.get("kdf_p")) |v| @as(u32, @intCast(v.integer)) else null,
         .secret_ref = if (obj.get("secret_ref")) |v| try allocator.dupe(u8, v.string) else null,
         .tpm2_pub_b64 = if (obj.get("tpm2_pub_b64")) |v| try allocator.dupe(u8, v.string) else null,
         .tpm2_priv_b64 = if (obj.get("tpm2_priv_b64")) |v| try allocator.dupe(u8, v.string) else null,
@@ -1008,6 +1075,7 @@ fn freeWrappedDekRecord(allocator: std.mem.Allocator, record: WrappedDekRecord) 
     allocator.free(record.nonce_b64);
     allocator.free(record.ciphertext_b64);
     allocator.free(record.created_at);
+    if (record.kdf) |v| allocator.free(v);
     if (record.secret_ref) |v| allocator.free(v);
     if (record.tpm2_pub_b64) |v| allocator.free(v);
     if (record.tpm2_priv_b64) |v| allocator.free(v);
@@ -1030,9 +1098,9 @@ fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8,
     const ref = try randomUrlSafe(allocator, 18);
     if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return .{ .secret = try allocator.dupe(u8, std.posix.getenv("UGRANT_TEST_PLATFORM_STORE_SECRET") orelse "platform-store-test-secret"), .secret_ref = ref };
     const secret = try randomUrlSafe(allocator, 32);
-    errdefer allocator.free(secret);
+    errdefer freeSecret(allocator, secret);
     const key_path = keys_path orelse return error.InvalidArgs;
-    const result = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "sh", "-c", "printf %s \"$1\" | secret-tool store --label 'ugrant DEK wrap secret' service ugrant secret_ref \"$2\" key_path \"$3\"", "sh", secret, ref, key_path }, .max_output_bytes = 4096 });
+    const result = try runChildWithInput(allocator, &.{ "secret-tool", "store", "--label", "ugrant DEK wrap secret", "service", "ugrant", "secret_ref", ref, "key_path", key_path }, secret, 4096);
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     switch (result.term) {
@@ -1050,7 +1118,7 @@ fn tpm2WrapSecret(allocator: std.mem.Allocator, record: ?WrappedDekRecord) !Wrap
         return unsealTpm2Secret(allocator, pub_blob, priv_blob);
     }
     const secret = if (envTruthy("UGRANT_TEST_TPM2_AVAILABLE")) try allocator.dupe(u8, std.posix.getenv("UGRANT_TEST_TPM2_SECRET") orelse "tpm2-test-secret") else try randomUrlSafe(allocator, 32);
-    errdefer allocator.free(secret);
+    errdefer freeSecret(allocator, secret);
     if (envTruthy("UGRANT_TEST_TPM2_AVAILABLE")) return .{ .secret = secret, .tpm2_pub_b64 = try allocator.dupe(u8, "dHBtMi1wdWI="), .tpm2_priv_b64 = try allocator.dupe(u8, "dHBtMi1wcml2") };
     return sealTpm2Secret(allocator, secret);
 }
@@ -1060,12 +1128,19 @@ fn sealTpm2Secret(allocator: std.mem.Allocator, secret: []const u8) !WrapSecret 
     defer tmp.cleanup();
     const base = try tmp.dir.realpathAlloc(allocator, ".");
     defer allocator.free(base);
+    const secret_path = try std.fs.path.join(allocator, &.{ base, "secret.bin" });
+    defer allocator.free(secret_path);
+    {
+        var file = try std.fs.createFileAbsolute(secret_path, .{ .truncate = true, .mode = pathing.secret_file_mode });
+        defer file.close();
+        try file.writeAll(secret);
+    }
     const script =
         "set -eu\n" ++
-        "BASE=\"$1\"\nSECRET=\"$2\"\nprintf %s \"$SECRET\" > \"$BASE/secret.bin\"\n" ++
+        "BASE=\"$1\"\n" ++
         "tpm2_createprimary -Q -C o -c \"$BASE/primary.ctx\" >/dev/null\n" ++
         "tpm2_create -Q -C \"$BASE/primary.ctx\" -u \"$BASE/wrap.pub\" -r \"$BASE/wrap.priv\" -i \"$BASE/secret.bin\" >/dev/null\n";
-    const result = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "sh", "-c", script, "sh", base, secret }, .max_output_bytes = 64 * 1024 });
+    const result = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "sh", "-c", script, "sh", base }, .max_output_bytes = 64 * 1024 });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     switch (result.term) {
@@ -1097,12 +1172,12 @@ fn unsealTpm2Secret(allocator: std.mem.Allocator, pub_b64: []const u8, priv_b64:
     defer allocator.free(primary_path);
     defer allocator.free(key_path);
     {
-        var file = try std.fs.createFileAbsolute(pub_path, .{ .truncate = true });
+        var file = try std.fs.createFileAbsolute(pub_path, .{ .truncate = true, .mode = pathing.secret_file_mode });
         defer file.close();
         try file.writeAll(pub_blob);
     }
     {
-        var file = try std.fs.createFileAbsolute(priv_path, .{ .truncate = true });
+        var file = try std.fs.createFileAbsolute(priv_path, .{ .truncate = true, .mode = pathing.secret_file_mode });
         defer file.close();
         try file.writeAll(priv_blob);
     }
@@ -1163,6 +1238,11 @@ fn freeGrantSecretRewrites(allocator: std.mem.Allocator, rewrites: []GrantSecret
 fn openDb(path: []const u8) !*c.sqlite3 {
     var db: ?*c.sqlite3 = null;
     if (c.sqlite3_open(path.ptr, &db) != c.SQLITE_OK) return error.SqliteOpen;
+    if (builtin.os.tag != .windows) {
+        var file = try std.fs.openFileAbsolute(path, .{});
+        defer file.close();
+        try file.chmod(pathing.secret_file_mode);
+    }
     return db.?;
 }
 
@@ -1472,6 +1552,21 @@ fn b64DecodeAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return out;
 }
 
+fn freeSecret(allocator: std.mem.Allocator, secret: []u8) void {
+    std.crypto.secureZero(u8, secret);
+    allocator.free(secret);
+}
+
+fn promptLine(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
+    var stdout_file = std.fs.File.stdout();
+    try stdout_file.writeAll(prompt);
+
+    var stdin_file = std.fs.File.stdin();
+    var buf: [4096]u8 = undefined;
+    const n = try stdin_file.read(&buf);
+    return allocator.dupe(u8, std.mem.trimRight(u8, buf[0..n], "\r\n"));
+}
+
 fn promptSecret(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
     var stdout_file = std.fs.File.stdout();
     try stdout_file.writeAll(prompt);
@@ -1617,15 +1712,38 @@ fn appendUrlEscaped(allocator: std.mem.Allocator, list: *std.ArrayList(u8), valu
     }
 }
 
-fn extractCodeFromRedirect(allocator: std.mem.Allocator, redirect: []const u8) ![]u8 {
-    const q_pos = std.mem.indexOfScalar(u8, redirect, '?') orelse 0;
-    const fragment = redirect[q_pos..];
-    var it = std.mem.splitScalar(u8, fragment, '&');
-    while (it.next()) |part| {
-        const clean = std.mem.trimLeft(u8, part, "?");
-        if (std.mem.startsWith(u8, clean, "code=")) return urlDecodeAlloc(allocator, clean[5..]);
+fn resolveManualCodeInput(allocator: std.mem.Allocator, raw_input: []const u8, expected_state: []const u8, allow_unsafe_bare_code: bool) ![]u8 {
+    const trimmed = std.mem.trim(u8, raw_input, " \r\n\t");
+    if (trimmed.len == 0) return error.CodeNotFound;
+    if (std.mem.indexOf(u8, trimmed, "://") != null or std.mem.indexOf(u8, trimmed, "code=") != null) {
+        return extractCodeFromRedirect(allocator, trimmed, expected_state);
     }
-    return error.CodeNotFound;
+    if (!allow_unsafe_bare_code) return error.UnsafeBareCodeRequiresFlag;
+    return allocator.dupe(u8, trimmed);
+}
+
+fn extractCodeFromRedirect(allocator: std.mem.Allocator, redirect: []const u8, expected_state: []const u8) ![]u8 {
+    const start = std.mem.indexOfAny(u8, redirect, "?#") orelse return error.CodeNotFound;
+    var code: ?[]u8 = null;
+    var state: ?[]u8 = null;
+    defer if (state) |value| allocator.free(value);
+
+    var it = std.mem.tokenizeAny(u8, redirect[start..], "?#&");
+    while (it.next()) |part| {
+        if (std.mem.startsWith(u8, part, "code=")) {
+            if (code == null) code = try urlDecodeAlloc(allocator, part[5..]);
+        } else if (std.mem.startsWith(u8, part, "state=")) {
+            if (state) |prev| allocator.free(prev);
+            state = try urlDecodeAlloc(allocator, part[6..]);
+        }
+    }
+
+    if (code == null) return error.CodeNotFound;
+    if (state == null or !std.mem.eql(u8, expected_state, state.?)) {
+        freeSecret(allocator, code.?);
+        return error.InvalidOAuthState;
+    }
+    return code.?;
 }
 
 fn urlDecodeAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
@@ -1690,11 +1808,41 @@ fn waitForLoopbackCode(allocator: std.mem.Allocator, redirect_uri: []const u8, e
     return code;
 }
 
+fn runChildWithInput(allocator: std.mem.Allocator, argv: []const []const u8, input: []const u8, max_output_bytes: usize) !std.process.Child.RunResult {
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+
+    var stdout = std.ArrayList(u8).empty;
+    defer stdout.deinit(allocator);
+    var stderr = std.ArrayList(u8).empty;
+    defer stderr.deinit(allocator);
+
+    try child.spawn();
+    errdefer {
+        _ = child.kill() catch {};
+    }
+
+    if (child.stdin) |*stdin_pipe| {
+        try stdin_pipe.writeAll(input);
+        stdin_pipe.close();
+        child.stdin = null;
+    }
+
+    try child.collectOutput(allocator, &stdout, &stderr, max_output_bytes);
+    return .{
+        .stdout = try stdout.toOwnedSlice(allocator),
+        .stderr = try stderr.toOwnedSlice(allocator),
+        .term = try child.wait(),
+    };
+}
+
 fn requestTokenResponse(allocator: std.mem.Allocator, token_url: []const u8, body_params: []const u8) ![]u8 {
     const script =
         "import sys, urllib.request, urllib.error\n" ++
         "url = sys.argv[1]\n" ++
-        "body = sys.argv[2].encode()\n" ++
+        "body = sys.stdin.buffer.read()\n" ++
         "req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/x-www-form-urlencoded'})\n" ++
         "try:\n" ++
         "    with urllib.request.urlopen(req) as r:\n" ++
@@ -1702,11 +1850,7 @@ fn requestTokenResponse(allocator: std.mem.Allocator, token_url: []const u8, bod
         "except urllib.error.HTTPError as e:\n" ++
         "    sys.stderr.buffer.write(e.read())\n" ++
         "    raise\n";
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ "python3", "-c", script, token_url, body_params },
-        .max_output_bytes = 1024 * 1024,
-    });
+    const result = try runChildWithInput(allocator, &.{ "python3", "-c", script, token_url }, body_params, 1024 * 1024);
     allocator.free(result.stderr);
     switch (result.term) {
         .Exited => |code_int| if (code_int != 0) {
@@ -2178,7 +2322,7 @@ fn collectStatusSummary(allocator: std.mem.Allocator, paths: Paths) !StatusSumma
         const wrapped = try loadWrappedDek(allocator, paths.keys_path);
         defer freeWrappedDekRecord(allocator, wrapped);
         backend = try allocator.dupe(u8, wrapped.backend);
-        security_mode = if (std.mem.eql(u8, wrapped.backend, "insecure-keyfile")) "degraded" else "normal";
+        security_mode = if (std.mem.eql(u8, wrapped.backend, "insecure-keyfile") or wrapped.kdf == null) "degraded" else "normal";
         const db = try openDb(paths.db_path);
         defer _ = c.sqlite3_close(db);
         profile_count = try countRows(db, "profiles");
@@ -2251,6 +2395,15 @@ test "loopback redirect detection is limited to localhost" {
     try std.testing.expect(!isLoopbackRedirect("https://example.com/callback"));
 }
 
+test "redirect extraction enforces oauth state" {
+    const allocator = std.testing.allocator;
+    const code = try extractCodeFromRedirect(allocator, "http://127.0.0.1:8788/callback?code=abc123&state=match-me", "match-me");
+    defer freeSecret(allocator, code);
+    try std.testing.expectEqualStrings("abc123", code);
+
+    try std.testing.expectError(error.InvalidOAuthState, extractCodeFromRedirect(allocator, "http://127.0.0.1:8788/callback?code=abc123&state=wrong", "match-me"));
+}
+
 test "wrapped dek metadata round trips optional backend fields" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -2259,15 +2412,47 @@ test "wrapped dek metadata round trips optional backend fields" {
     defer allocator.free(base);
     const keys_path = try std.fs.path.join(allocator, &.{ base, "keys.json" });
     defer allocator.free(keys_path);
-    const record = WrappedDekRecord{ .version = 2, .backend = try allocator.dupe(u8, "platform-secure-store"), .key_version = 4, .salt_b64 = try allocator.dupe(u8, "salt"), .nonce_b64 = try allocator.dupe(u8, "nonce"), .ciphertext_b64 = try allocator.dupe(u8, "cipher"), .created_at = try allocator.dupe(u8, "123"), .secret_ref = try allocator.dupe(u8, "ref-1"), .tpm2_pub_b64 = try allocator.dupe(u8, "pub"), .tpm2_priv_b64 = try allocator.dupe(u8, "priv") };
+    const record = WrappedDekRecord{ .version = 3, .backend = try allocator.dupe(u8, "platform-secure-store"), .key_version = 4, .salt_b64 = try allocator.dupe(u8, "salt"), .nonce_b64 = try allocator.dupe(u8, "nonce"), .ciphertext_b64 = try allocator.dupe(u8, "cipher"), .created_at = try allocator.dupe(u8, "123"), .kdf = try allocator.dupe(u8, argon2_kdf_name), .kdf_t = argon2_params.t, .kdf_m = argon2_params.m, .kdf_p = argon2_params.p, .secret_ref = try allocator.dupe(u8, "ref-1"), .tpm2_pub_b64 = try allocator.dupe(u8, "pub"), .tpm2_priv_b64 = try allocator.dupe(u8, "priv") };
     defer freeWrappedDekRecord(allocator, record);
     try saveWrappedDek(keys_path, record);
     const loaded = try loadWrappedDek(allocator, keys_path);
     defer freeWrappedDekRecord(allocator, loaded);
     try std.testing.expectEqualStrings("platform-secure-store", loaded.backend);
+    try std.testing.expectEqualStrings(argon2_kdf_name, loaded.kdf.?);
     try std.testing.expectEqualStrings("ref-1", loaded.secret_ref.?);
     try std.testing.expectEqualStrings("pub", loaded.tpm2_pub_b64.?);
     try std.testing.expectEqualStrings("priv", loaded.tpm2_priv_b64.?);
+}
+
+test "legacy wrapped dek records remain readable" {
+    const allocator = std.testing.allocator;
+    var salt: [kdf_salt_len]u8 = [_]u8{0x11} ** kdf_salt_len;
+    var nonce: [gcm_nonce_len]u8 = [_]u8{0x22} ** gcm_nonce_len;
+    var dek: [dek_len]u8 = [_]u8{0x33} ** dek_len;
+    var key: [dek_len]u8 = undefined;
+    deriveLegacyWrapKey(&key, "legacy-passphrase", &salt);
+    var ct: [dek_len]u8 = undefined;
+    var tag: [gcm_tag_len]u8 = undefined;
+    crypto.aead.aes_gcm.Aes256Gcm.encrypt(&ct, &tag, &dek, "ugrant-dek-wrap", nonce, key);
+    var combined: [dek_len + gcm_tag_len]u8 = undefined;
+    @memcpy(combined[0..dek_len], &ct);
+    @memcpy(combined[dek_len..], &tag);
+
+    const record = WrappedDekRecord{
+        .version = 2,
+        .backend = try allocator.dupe(u8, "passphrase"),
+        .key_version = 1,
+        .salt_b64 = try b64EncodeAlloc(allocator, &salt),
+        .nonce_b64 = try b64EncodeAlloc(allocator, &nonce),
+        .ciphertext_b64 = try b64EncodeAlloc(allocator, &combined),
+        .created_at = try allocator.dupe(u8, "123"),
+    };
+    defer freeWrappedDekRecord(allocator, record);
+
+    const unwrapped = try unwrapDekWithSecret(allocator, record, "legacy-passphrase");
+    defer freeSecret(allocator, unwrapped);
+    try std.testing.expectEqualSlices(u8, &dek, unwrapped);
+    try std.testing.expect(record.kdf == null);
 }
 
 const TestVault = struct {
