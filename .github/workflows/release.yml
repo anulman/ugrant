@@ -24,6 +24,8 @@ jobs:
             artifact_os: linux
           - os: macos-latest
             artifact_os: macos
+          - os: windows-latest
+            artifact_os: windows
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -37,14 +39,8 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Install Linux deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev
-
       - name: Run tests
-        run: zig test src/main.zig -lc -lsqlite3
+        run: zig build test
 
       - name: Build
         run: zig build -Doptimize=ReleaseSafe
@@ -57,8 +53,16 @@ jobs:
           ARCH="$(uname -m)"
           NAME="ugrant-${{ github.event.inputs.tag }}-${{ matrix.artifact_os }}-${ARCH}"
           PKGDIR="dist/${NAME}"
+          BIN_NAME="ugrant"
+          PKG_BIN_NAME="ugrant"
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN_NAME="ugrant.exe"
+            PKG_BIN_NAME="ugrant.exe"
+          fi
+
           mkdir -p "$PKGDIR"
-          cp zig-out/bin/ugrant "$PKGDIR/ugrant"
+          cp "zig-out/bin/${BIN_NAME}" "$PKGDIR/${PKG_BIN_NAME}"
           cp README.md LICENSE SPEC.md "$PKGDIR/"
           tar -C dist -czf "dist/${NAME}.tar.gz" "$NAME"
           shasum -a 256 "dist/${NAME}.tar.gz" > "dist/${NAME}.tar.gz.sha256"
@@ -76,11 +80,6 @@ jobs:
       contents: write
 
     steps:
-      - name: Check out
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          persist-credentials: false
-
       - name: Download packaged artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -88,19 +87,30 @@ jobs:
           merge-multiple: true
 
       - name: Install minisign
-        if: ${{ secrets.MINISIGN_SECRET_KEY != '' }}
+        shell: bash
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "MINISIGN_SECRET_KEY not set, skipping minisign install."
+            exit 0
+          fi
           sudo apt-get update
           sudo apt-get install -y minisign
 
       - name: Sign release archives
-        if: ${{ secrets.MINISIGN_SECRET_KEY != '' }}
         shell: bash
         env:
           TAG: ${{ github.event.inputs.tag }}
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           set -euo pipefail
+
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "MINISIGN_SECRET_KEY not set, skipping minisign signing."
+            exit 0
+          fi
 
           if grep -q '^REPLACE_WITH_MINISIGN_PUBLIC_KEY$' minisign.pub; then
             echo "minisign.pub still contains the placeholder key. Skipping minisign signing for this release." >&2
