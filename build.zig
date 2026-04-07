@@ -1,10 +1,23 @@
 const std = @import("std");
 
+fn addSqlite(step: *std.Build.Step.Compile, b: *std.Build) void {
+    step.root_module.addIncludePath(b.path("third_party/sqlite-amalgamation"));
+    step.root_module.addCSourceFile(.{
+        .file = b.path("third_party/sqlite-amalgamation/sqlite3.c"),
+        .flags = &.{
+            "-DSQLITE_THREADSAFE=1",
+            "-DSQLITE_ENABLE_FTS5",
+            "-DSQLITE_ENABLE_RTREE",
+            "-DSQLITE_ENABLE_DBSTAT_VTAB",
+        },
+    });
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.createModule(.{
+    const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
@@ -13,9 +26,9 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "ugrant",
-        .root_module = mod,
+        .root_module = exe_mod,
     });
-    exe.linkSystemLibrary("sqlite3");
+    addSqlite(exe, b);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -25,10 +38,17 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run ugrant");
     run_step.dependOn(&run_cmd.step);
 
-    const unit_tests = b.addTest(.{
-        .root_module = mod,
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
     });
-    unit_tests.linkSystemLibrary("sqlite3");
+
+    const unit_tests = b.addTest(.{
+        .root_module = test_mod,
+    });
+    addSqlite(unit_tests, b);
 
     const test_run = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
