@@ -49,6 +49,10 @@ Verification behavior:
 
 If `minisign` is installed, the installer should prefer it automatically.
 
+Windows install path:
+
+- `install.ps1` installs `ugrant.exe` into `%LOCALAPPDATA%\Programs\ugrant\bin` and updates the user PATH.
+
 ## Common flow
 
 ### 1. Initialize
@@ -80,6 +84,16 @@ ugrant login --profile gmail
 ```bash
 ugrant exec --profile gmail -- python sync_mail.py
 ```
+
+## Windows notes
+
+- Config path: `%USERPROFILE%\.config\ugrant\config.toml`
+- State directory: `%USERPROFILE%\.local\state\ugrant\`
+- State files include `state.db` and wrapped key material under the state directory.
+- Backend selection: on Windows, `ugrant init` should prefer `platform-secure-store`. Linux-only TPM2 guidance does not apply.
+- Login flow is not fully autonomous. During `ugrant login`, the human may still need to open the URL, approve scopes, and possibly paste a final redirect URL back into the terminal.
+- Secret prompts are hidden in a normal Windows console.
+- Command surface stays the same on Windows: `ugrant init`, `ugrant profile add`, `ugrant login`, `ugrant exec`, `ugrant status`, `ugrant doctor`.
 
 ## Useful commands
 
@@ -146,6 +160,8 @@ curl -fsSLo minisign.pub https://www.ugrant.sh/minisign.pub
 
 minisign -Vm "$ARCHIVE" -p minisign.pub -x "${ARCHIVE}.minisig"
 ```
+
+For Windows releases, use `TARGET=windows-x86_64` and a `.zip` archive name instead of `.tar.gz`.
 
 ## What not to assume
 

@@ -90,6 +90,15 @@ irm https://www.ugrant.sh/install.ps1 | iex
 
 Both installers prefer minisign verification when `minisign` is available. If not, they fall back to the matching `.sha256` file with a blunt warning so older environments still work.
 
+## Windows notes
+
+- `install.ps1` installs `ugrant.exe` to `%LOCALAPPDATA%\Programs\ugrant\bin` and updates your user PATH.
+- Config lives at `%USERPROFILE%\.config\ugrant\config.toml`. State lives at `%USERPROFILE%\.local\state\ugrant\` with `state.db` and wrapped key material.
+- `ugrant init` on Windows prefers the `platform-secure-store` backend, which uses the native Windows secure store.
+- Command usage is otherwise the same: run `ugrant init`, `ugrant profile add ...`, `ugrant login --profile <name>`, then `ugrant exec --profile <name> -- <command>`.
+- The OAuth consent step is still a human checkpoint. `ugrant login` may open a browser flow or print a URL, and some providers may ask you to paste a final redirect URL back into the terminal.
+- Secret prompts are hidden in a normal Windows console, but OAuth consent is not bypassed or automated for you.
+
 ## Verify a release manually
 
 ### Preferred: minisign
