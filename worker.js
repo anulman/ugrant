@@ -232,7 +232,7 @@ if [ -z "$binary" ]; then
   exit 1
 fi
 
-install_dir="${HOME}/.local/bin"
+install_dir="$HOME/.local/bin"
 mkdir -p "$install_dir"
 cp "$binary" "$install_dir/ugrant"
 chmod +x "$install_dir/ugrant"
