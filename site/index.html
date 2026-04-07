@@ -43,6 +43,7 @@
         <nav class="top-nav" aria-label="Primary">
           <a href="#install">Install</a>
           <a href="#quick-start">Quick start</a>
+          <a href="#verify">Verify</a>
           <a href="#why">Why</a>
           <a href="https://github.com/anulman/ugrant" target="_blank" rel="noreferrer">GitHub</a>
         </nav>
@@ -57,23 +58,24 @@
               <strong>ugrant</strong> is a small local token broker for scripts, shell tools, and CLIs that need OAuth without becoming their own credential manager.
             </p>
             <p class="sublede">
-              Secure local token custody, refresh, and env injection, with a checksum-verifying install script and no daemon required for the MVP.
+              Secure local token custody, refresh, and env injection, with minisign-signed releases, a checksum fallback, and no daemon required for the MVP.
             </p>
 
             <div class="install-callout" id="install">
               <p class="install-label">Install</p>
               <pre><code>curl -fsSLo /tmp/ugrant-install.sh https://www.ugrant.sh/install.sh && sh /tmp/ugrant-install.sh</code></pre>
+              <p>The installer prefers minisign verification automatically when `minisign` is present.</p>
             </div>
 
             <div class="hero-actions">
               <a class="button primary" href="#quick-start">Quick start</a>
-              <a class="button secondary" href="https://github.com/anulman/ugrant" target="_blank" rel="noreferrer">View on GitHub</a>
+              <a class="button secondary" href="#verify">Verify a release</a>
             </div>
 
             <ul class="hero-points">
               <li>OAuth login once, then clean child envs on demand</li>
               <li>Encrypted local storage with refresh and rekey support</li>
-              <li>Works for scripts, shell wrappers, and local developer tools</li>
+              <li>Minisign signatures for published release archives</li>
             </ul>
           </div>
 
@@ -91,9 +93,9 @@
             </p>
           </div>
           <div class="strip-card">
-            <h2>No app-platform nonsense</h2>
+            <h2>Signed like a grown-up tool</h2>
             <p>
-              Just a CLI. Add a profile, log in once, then run your tool through <code>ugrant exec</code> or inspect env with <code>ugrant env</code>.
+              Releases ship with minisign signatures for authenticity, while checksums stay around as a compatibility fallback for older systems.
             </p>
           </div>
         </section>
@@ -127,6 +129,31 @@
             <article class="code-card">
               <h3>4. Run your tool</h3>
               <pre><code>ugrant exec --profile gmail -- python sync_mail.py</code></pre>
+            </article>
+          </div>
+        </section>
+
+        <section class="section" id="verify">
+          <div class="section-heading">
+            <p class="eyebrow">Verify</p>
+            <h2>Minisign first. Checksums if you absolutely must.</h2>
+          </div>
+
+          <div class="code-grid">
+            <article class="code-card">
+              <h3>Fetch the archive, signature, and public key</h3>
+              <pre><code>TAG=v0.1.0
+TARGET=linux-x86_64
+ARCHIVE="ugrant-${TAG}-${TARGET}.tar.gz"
+
+curl -fsSL "https://www.ugrant.sh/install?target=${TARGET}" -o "$ARCHIVE"
+curl -fsSL "https://www.ugrant.sh/install?target=${TARGET}&amp;kind=minisig" -o "${ARCHIVE}.minisig"
+curl -fsSLo minisign.pub https://www.ugrant.sh/minisign.pub</code></pre>
+            </article>
+
+            <article class="code-card">
+              <h3>Verify with minisign</h3>
+              <pre><code>minisign -Vm "$ARCHIVE" -p minisign.pub -x "${ARCHIVE}.minisig"</code></pre>
             </article>
           </div>
         </section>
@@ -180,7 +207,7 @@
         <div class="footer-links">
           <a href="https://github.com/anulman/ugrant" target="_blank" rel="noreferrer">GitHub</a>
           <a href="#install">Install</a>
-          <a href="#quick-start">Quick start</a>
+          <a href="#verify">Verify</a>
         </div>
       </footer>
     </div>

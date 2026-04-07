@@ -2,6 +2,14 @@ const GITHUB_REPO = "https://github.com/anulman/ugrant";
 const GITHUB_API_LATEST = "https://api.github.com/repos/anulman/ugrant/releases/latest";
 const WWW_HOST = "www.ugrant.sh";
 const SUPPORTED_TARGETS = new Set(["linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64"]);
+const MINISIGN_PUBLIC_KEY_COMMENT = "minisign public key for ugrant releases";
+const MINISIGN_PUBLIC_KEY = "REPLACE_WITH_MINISIGN_PUBLIC_KEY";
+const MINISIGN_PUBLIC_KEY_FILE = `untrusted comment: ${MINISIGN_PUBLIC_KEY_COMMENT}\n${MINISIGN_PUBLIC_KEY}\n`;
+const INSTALL_KIND_SUFFIX = {
+  archive: "",
+  sha256: ".sha256",
+  minisig: ".minisig",
+};
 
 export default {
   async fetch(request, env) {
@@ -34,6 +42,15 @@ export default {
       });
     }
 
+    if (url.pathname === "/minisign.pub") {
+      return new Response(MINISIGN_PUBLIC_KEY_FILE, {
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          "cache-control": "public, max-age=300",
+        },
+      });
+    }
+
     return env.ASSETS.fetch(request);
   },
 };
@@ -43,7 +60,8 @@ async function redirectInstall(request) {
   const url = new URL(request.url);
   const requestedTarget = url.searchParams.get("target") || pickRequestedArtifact(request.headers.get("user-agent") || "");
   const target = normalizeTarget(requestedTarget);
-  const kind = url.searchParams.get("kind") === "sha256" ? "sha256" : "archive";
+  const kind = normalizeInstallKind(url.searchParams.get("kind"));
+
   if (!target) {
     return Response.redirect(fallback, 302);
   }
@@ -57,26 +75,32 @@ async function redirectInstall(request) {
       cf: { cacheTtl: 300, cacheEverything: true },
     });
     if (!response.ok) {
-      return Response.redirect(fallback, 302);
+      return new Response("Could not resolve the latest GitHub release metadata.", { status: 502 });
     }
 
     const release = await response.json();
     const tag = typeof release?.tag_name === "string" ? release.tag_name : null;
     const assets = Array.isArray(release.assets) ? release.assets : [];
     if (!tag) {
-      return Response.redirect(fallback, 302);
+      return new Response("Latest GitHub release is missing a tag name.", { status: 502 });
     }
 
-    const expectedName = `ugrant-${tag}-${target}.tar.gz${kind === "sha256" ? ".sha256" : ""}`;
+    const expectedName = `ugrant-${tag}-${target}.tar.gz${INSTALL_KIND_SUFFIX[kind]}`;
     const match = assets.find((asset) => typeof asset?.name === "string" && asset.name === expectedName);
     if (match?.browser_download_url) {
       return Response.redirect(match.browser_download_url, 302);
     }
-  } catch {
-    // fall through to latest release page
-  }
 
-  return Response.redirect(fallback, 302);
+    return new Response(`Could not find release asset: ${expectedName}`, { status: 404 });
+  } catch {
+    return new Response("Could not reach GitHub to resolve the requested release asset.", { status: 502 });
+  }
+}
+
+function normalizeInstallKind(kind) {
+  if (kind === "sha256") return "sha256";
+  if (kind === "minisig") return "minisig";
+  return "archive";
 }
 
 function normalizeTarget(target) {
@@ -101,8 +125,10 @@ const INSTALL_SCRIPT = String.raw`#!/bin/sh
 set -eu
 
 BASE_URL="https://www.ugrant.sh"
+MINISIGN_PUBLIC_KEY="REPLACE_WITH_MINISIGN_PUBLIC_KEY"
 OS="$(uname -s)"
 ARCH="$(uname -m)"
+verification_summary=""
 
 case "$OS" in
   Linux) os="linux" ;;
@@ -136,10 +162,20 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 archive="$tmpdir/ugrant.tar.gz"
+signature="$tmpdir/ugrant.tar.gz.minisig"
 checksum="$tmpdir/ugrant.tar.gz.sha256"
 
-curl -fsSL "$BASE_URL/install?target=$target" -o "$archive"
-curl -fsSL "$BASE_URL/install?target=$target&kind=sha256" -o "$checksum"
+download_archive() {
+  curl -fsSL "$BASE_URL/install?target=$target" -o "$archive"
+}
+
+download_signature() {
+  curl -fsSL "$BASE_URL/install?target=$target&kind=minisig" -o "$signature"
+}
+
+download_checksum() {
+  curl -fsSL "$BASE_URL/install?target=$target&kind=sha256" -o "$checksum"
+}
 
 verify_checksum() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -166,7 +202,27 @@ verify_checksum() {
   exit 1
 }
 
-verify_checksum
+verify_archive() {
+  if command -v minisign >/dev/null 2>&1 && [ "$MINISIGN_PUBLIC_KEY" != "REPLACE_WITH_MINISIGN_PUBLIC_KEY" ]; then
+    download_signature
+    minisign -Vm "$archive" -P "$MINISIGN_PUBLIC_KEY" -x "$signature"
+    verification_summary="Verified release signature with minisign"
+    return
+  fi
+
+  if command -v minisign >/dev/null 2>&1; then
+    echo "minisign is installed, but this installer does not have an embedded public key yet. Falling back to checksum verification." >&2
+  else
+    echo "minisign not found, falling back to checksum verification. Install minisign for stronger release authenticity checks." >&2
+  fi
+
+  download_checksum
+  verify_checksum
+  verification_summary="Verified archive checksum (compatibility fallback)"
+}
+
+download_archive
+verify_archive
 
 tar -xzf "$archive" -C "$tmpdir"
 
@@ -182,6 +238,6 @@ cp "$binary" "$install_dir/ugrant"
 chmod +x "$install_dir/ugrant"
 
 echo "Installed ugrant to $install_dir/ugrant"
-echo "Verified archive checksum before install"
+echo "$verification_summary"
 echo "Make sure $install_dir is on your PATH"
 `;

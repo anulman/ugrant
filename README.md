@@ -4,7 +4,7 @@
 
 It keeps grant material local, encrypts secret fields at rest, refreshes access tokens on use, and injects only the child-safe environment a tool actually needs.
 
-Recent hardening includes Argon2id passphrase wrapping, 0700/0600 secret-state permissions on Unix, state-validated manual login fallback, and checksum-verified release installs.
+Recent hardening includes Argon2id passphrase wrapping, 0700/0600 secret-state permissions on Unix, state-validated manual login fallback, concurrent refresh leasing, and minisign-signed release archives with checksum fallback installs.
 
 ## What it does
 
@@ -13,6 +13,7 @@ Recent hardening includes Argon2id passphrase wrapping, 0700/0600 secret-state p
 - Strong local backend selection (`platform-secure-store`, `tpm2`, `passphrase`, explicit insecure fallback)
 - Child-safe env injection via `ugrant env` and `ugrant exec`
 - Concurrent refresh leasing so one process refreshes while others wait
+- Minisign-signed release archives, with `.sha256` files kept for compatibility
 
 ## Build
 
@@ -58,13 +59,52 @@ Manual login fallback accepts a full redirect URL by default. Bare auth-code ent
 curl -fsSLo /tmp/ugrant-install.sh https://www.ugrant.sh/install.sh && sh /tmp/ugrant-install.sh
 ```
 
-The install script fetches the matching release checksum and verifies the archive before copying the binary into `~/.local/bin`.
+The install script prefers minisign verification when `minisign` is available. If not, it falls back to the matching `.sha256` file with a blunt warning so older environments still work.
+
+## Verify a release manually
+
+Minisign is the preferred authenticity check for published archives.
+
+```bash
+TAG=v0.1.0
+TARGET=linux-x86_64
+ARCHIVE="ugrant-${TAG}-${TARGET}.tar.gz"
+
+curl -fsSL "https://www.ugrant.sh/install?target=${TARGET}" -o "$ARCHIVE"
+curl -fsSL "https://www.ugrant.sh/install?target=${TARGET}&kind=minisig" -o "${ARCHIVE}.minisig"
+curl -fsSLo minisign.pub https://www.ugrant.sh/minisign.pub
+
+minisign -Vm "$ARCHIVE" -p minisign.pub -x "${ARCHIVE}.minisig"
+```
+
+For environments without `minisign`, the matching checksum remains available:
+
+```bash
+curl -fsSL "https://www.ugrant.sh/install?target=${TARGET}&kind=sha256" -o "${ARCHIVE}.sha256"
+sha256sum -c "${ARCHIVE}.sha256"
+```
+
+## Maintainer notes for release signing
+
+The release workflow expects:
+
+- a checked-in `minisign.pub` file containing the public key for release verification
+- a GitHub Actions secret named `MINISIGN_SECRET_KEY` containing the matching secret key
+
+A pragmatic way to generate that pair for CI is:
+
+```bash
+minisign -G -W -p minisign.pub -s ugrant.minisign.key
+```
+
+That creates an unencrypted secret key, which is simpler for GitHub Actions automation. Store the contents of `ugrant.minisign.key` in the `MINISIGN_SECRET_KEY` repository secret, and commit `minisign.pub`.
 
 ## Project files
 
 - `src/main.zig` — CLI implementation
 - `SPEC.md` — user-visible behavior/spec
 - `site/` — single-page homepage draft for `ugrant.sh`
+- `minisign.pub` — checked-in release verification key
 
 ## Website draft
 
