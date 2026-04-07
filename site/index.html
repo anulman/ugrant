@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ugrant, portable OAuth grants for CLIs</title>
+    <meta
+      name="description"
+      content="ugrant is a portable OAuth 2.0 token broker and exec wrapper for local tools, scripts, and shell workflows."
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="site-header">
+        <a class="wordmark" href="#top">ugrant</a>
+        <nav class="top-nav" aria-label="Primary">
+          <a href="#install">Install</a>
+          <a href="#quick-start">Quick start</a>
+          <a href="#why">Why</a>
+          <a href="https://github.com/anulman/ugrant" target="_blank" rel="noreferrer">GitHub</a>
+        </nav>
+      </header>
+
+      <main id="top">
+        <section class="hero">
+          <div class="hero-copy">
+            <p class="eyebrow">Portable OAuth grants for CLIs</p>
+            <h1>Grant access, beautifully.</h1>
+            <p class="lede">
+              <strong>ugrant</strong> is a small local token broker for scripts, shell tools, and CLIs that need OAuth without becoming their own credential manager.
+            </p>
+            <p class="sublede">
+              Secure local token custody, refresh, and env injection, with one install command and no daemon required for the MVP.
+            </p>
+
+            <div class="install-callout" id="install">
+              <p class="install-label">Install</p>
+              <pre><code>curl -fsSL https://ugrant.sh/install | sh</code></pre>
+            </div>
+
+            <div class="hero-actions">
+              <a class="button primary" href="#quick-start">Quick start</a>
+              <a class="button secondary" href="https://github.com/anulman/ugrant" target="_blank" rel="noreferrer">View on GitHub</a>
+            </div>
+
+            <ul class="hero-points">
+              <li>OAuth login once, then clean child envs on demand</li>
+              <li>Encrypted local storage with refresh and rekey support</li>
+              <li>Works for scripts, shell wrappers, and local developer tools</li>
+            </ul>
+          </div>
+
+          <figure class="hero-art">
+            <img src="./hero-hugh-grant.jpg" alt="A comedic, Hugh Grant-inspired illustration handing out access grants." />
+            <figcaption>Small tool. Big trust.</figcaption>
+          </figure>
+        </section>
+
+        <section class="strip">
+          <div class="strip-card">
+            <h2>What it actually does</h2>
+            <p>
+              Stores refresh tokens locally, keeps secret fields encrypted at rest, refreshes access tokens when needed, and injects only the child-safe env vars your tool actually needs.
+            </p>
+          </div>
+          <div class="strip-card">
+            <h2>No app-platform nonsense</h2>
+            <p>
+              Just a CLI. Add a profile, log in once, then run your tool through <code>ugrant exec</code> or inspect env with <code>ugrant env</code>.
+            </p>
+          </div>
+        </section>
+
+        <section class="section" id="quick-start">
+          <div class="section-heading">
+            <p class="eyebrow">Quick start</p>
+            <h2>One install, four commands, done.</h2>
+          </div>
+
+          <div class="code-grid">
+            <article class="code-card">
+              <h3>1. Initialize local state</h3>
+              <pre><code>ugrant init</code></pre>
+            </article>
+
+            <article class="code-card">
+              <h3>2. Add a profile</h3>
+              <pre><code>ugrant profile add \
+  --name gmail \
+  --service google-imap \
+  --client-id &lt;id&gt; \
+  --client-secret &lt;secret&gt;</code></pre>
+            </article>
+
+            <article class="code-card">
+              <h3>3. Log in once</h3>
+              <pre><code>ugrant login --profile gmail</code></pre>
+            </article>
+
+            <article class="code-card">
+              <h3>4. Run your tool</h3>
+              <pre><code>ugrant exec --profile gmail -- python sync_mail.py</code></pre>
+            </article>
+          </div>
+        </section>
+
+        <section class="section" id="why">
+          <div class="section-heading">
+            <p class="eyebrow">Why ugrant</p>
+            <h2>Built for local tools that need OAuth, not a whole identity platform.</h2>
+          </div>
+
+          <div class="feature-grid">
+            <article class="feature-card">
+              <h3>Portable local custody</h3>
+              <p>
+                Keep grant material local, with strong backend selection, rekey support, and simple status visibility.
+              </p>
+            </article>
+            <article class="feature-card">
+              <h3>Child-safe env injection</h3>
+              <p>
+                Pass access tokens to the child process only when needed. Refresh tokens stay out of child envs.
+              </p>
+            </article>
+            <article class="feature-card">
+              <h3>Refresh without a mess</h3>
+              <p>
+                Handles stale-token refresh on use, including concurrent refresh coordination across multiple invocations.
+              </p>
+            </article>
+            <article class="feature-card">
+              <h3>Shell first</h3>
+              <p>
+                Works well with scripts, wrappers, daemons, and plain old Unix tooling. No giant framework required.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section section--compact">
+          <div class="quote-block">
+            <p>
+              <span class="quote-mark">“</span>
+              Good access, well granted.
+            </p>
+          </div>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <p>ugrant is a portable OAuth 2.0 token broker and exec wrapper.</p>
+        <div class="footer-links">
+          <a href="https://github.com/anulman/ugrant" target="_blank" rel="noreferrer">GitHub</a>
+          <a href="#install">Install</a>
+          <a href="#quick-start">Quick start</a>
+        </div>
+      </footer>
+    </div>
+  </body>
+</html>

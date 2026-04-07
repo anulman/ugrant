@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.1.0
+        required: true
+      title:
+        description: Release title
+        required: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_os: linux
+          - os: macos-latest
+            artifact_os: macos
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.15.2
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
+
+      - name: Run tests
+        run: zig test src/main.zig -lc -lsqlite3
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ARCH="$(uname -m)"
+          NAME="ugrant-${{ github.event.inputs.tag }}-${{ matrix.artifact_os }}-${ARCH}"
+          PKGDIR="dist/${NAME}"
+          mkdir -p "$PKGDIR"
+          cp zig-out/bin/ugrant "$PKGDIR/ugrant"
+          cp README.md LICENSE SPEC.md "$PKGDIR/"
+          tar -C dist -czf "dist/${NAME}.tar.gz" "$NAME"
+          shasum -a 256 "dist/${NAME}.tar.gz" > "dist/${NAME}.tar.gz.sha256"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact_os }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag }}
+          TITLE: ${{ github.event.inputs.title }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "${TITLE:-$TAG}" --notes "Release $TAG"
+          gh release upload "$TAG" dist/* --clobber
