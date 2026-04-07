@@ -1486,7 +1486,10 @@ fn sqliteErr(db: *c.sqlite3) error{SqliteFailure} {
 }
 
 fn bindText(stmt: *c.sqlite3_stmt, idx: c_int, text: []const u8) !void {
-    if (c.sqlite3_bind_text(stmt, idx, text.ptr, @as(c_int, @intCast(text.len)), c.SQLITE_TRANSIENT) != c.SQLITE_OK) return error.SqliteBind;
+    // Current call sites keep the bound buffer alive until sqlite3_step/finalize,
+    // so SQLITE_STATIC semantics are sufficient here and avoid macOS Zig cimport
+    // issues around SQLITE_TRANSIENT.
+    if (c.sqlite3_bind_text(stmt, idx, text.ptr, @as(c_int, @intCast(text.len)), null) != c.SQLITE_OK) return error.SqliteBind;
 }
 fn bindNullableText(stmt: *c.sqlite3_stmt, idx: c_int, text: ?[]const u8) !void {
     if (text) |v| return bindText(stmt, idx, v);
