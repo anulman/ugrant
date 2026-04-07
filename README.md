@@ -2,6 +2,12 @@
 
 `ugrant` is a portable OAuth 2.0 token broker and exec wrapper for local tools, scripts, and shell workflows.
 
+## Agent quickstart
+
+- Use-agent entrypoint: `https://www.ugrant.sh/llms.txt`
+- Full site agent guide: `https://www.ugrant.sh/llms-full.txt`
+- Coding-agent entrypoint: read [`AGENTS.md`](./AGENTS.md) first
+
 It keeps grant material local, encrypts secret fields at rest, refreshes access tokens on use, and injects only the child-safe environment a tool actually needs.
 
 Recent hardening includes Argon2id passphrase wrapping, 0700/0600 secret-state permissions on Unix, state-validated manual login fallback, concurrent refresh leasing, and minisign-signed release archives with checksum fallback installs.
@@ -52,6 +58,18 @@ ugrant exec --profile gmail -- python sync_mail.py
 ```
 
 Manual login fallback accepts a full redirect URL by default. Bare auth-code entry is still available, but only with `--unsafe-bare-code` because it skips OAuth state validation.
+
+## Agent flow
+
+If you're driving `ugrant` from an AI agent, the happy path is:
+
+1. install `ugrant`
+2. run `ugrant init`
+3. run `ugrant profile add ...`
+4. pause for human OAuth consent during `ugrant login`
+5. resume with `ugrant exec --profile ... -- <command>`
+
+That split matters. Agents can handle setup, but OAuth approval is still a human boundary.
 
 ## Install
 

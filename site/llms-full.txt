@@ -1,0 +1,159 @@
+# ugrant agent guide
+
+This guide is for AI agents that need to use `ugrant` effectively without guessing from the marketing site.
+
+## What ugrant is
+
+`ugrant` is a portable OAuth 2.0 token broker and exec wrapper.
+
+Use it when a local script, CLI, shell workflow, or daemon needs OAuth credentials but should not become its own credential manager.
+
+`ugrant` stores refreshable grants locally, refreshes access tokens when needed, and injects only the child-safe environment a downstream process actually needs.
+
+## What an agent should do
+
+The intended flow is:
+
+1. install `ugrant`
+2. initialize local state
+3. add the correct profile
+4. start login
+5. stop at the human consent boundary if browser approval is required
+6. resume after consent
+7. run the downstream command through `ugrant exec`
+8. use `ugrant status` or `ugrant doctor` to diagnose problems
+
+## Human consent boundary
+
+Agents should not pretend OAuth browser consent is purely automatic.
+
+During `ugrant login`, the human may need to:
+
+- open the printed authorization URL
+- sign in
+- approve scopes
+- paste back a redirect URL if the provider requires the manual fallback path
+
+That is expected behavior, not failure.
+
+## Install
+
+```bash
+curl -fsSLo /tmp/ugrant-install.sh https://www.ugrant.sh/install.sh && sh /tmp/ugrant-install.sh
+```
+
+Verification behavior:
+
+- preferred: minisign verification
+- compatibility fallback: `.sha256` verification
+
+If `minisign` is installed, the installer should prefer it automatically.
+
+## Common flow
+
+### 1. Initialize
+
+```bash
+ugrant init
+```
+
+### 2. Add a profile
+
+Google IMAP example:
+
+```bash
+ugrant profile add \
+  --name gmail \
+  --service google-imap \
+  --client-id <id> \
+  --client-secret <secret>
+```
+
+### 3. Log in
+
+```bash
+ugrant login --profile gmail
+```
+
+### 4. Run the downstream command
+
+```bash
+ugrant exec --profile gmail -- python sync_mail.py
+```
+
+## Useful commands
+
+List or inspect state:
+
+```bash
+ugrant status --profile <name>
+```
+
+Show diagnostic information:
+
+```bash
+ugrant doctor
+```
+
+Print child env:
+
+```bash
+ugrant env --profile <name>
+```
+
+Run a child command with injected credentials:
+
+```bash
+ugrant exec --profile <name> -- <command>
+```
+
+## Current documented capabilities
+
+Documented surface today includes:
+
+- `ugrant init`
+- `ugrant profile add`
+- `ugrant profile list`
+- `ugrant login`
+- `ugrant env`
+- `ugrant exec`
+- `ugrant revoke`
+- `ugrant rekey`
+- `ugrant status`
+- `ugrant doctor`
+
+## For coding agents
+
+If you are modifying `ugrant` itself rather than using it, go to the repo and read `AGENTS.md` first:
+
+- Repo: https://github.com/anulman/ugrant
+- Coding-agent guide: https://github.com/anulman/ugrant/blob/main/AGENTS.md
+
+## Trust and verification
+
+Published release archives are meant to be authenticity-checked with minisign.
+
+Manual verification flow:
+
+```bash
+TAG=v0.1.0
+TARGET=linux-x86_64
+ARCHIVE="ugrant-${TAG}-${TARGET}.tar.gz"
+
+curl -fsSL "https://www.ugrant.sh/install?target=${TARGET}" -o "$ARCHIVE"
+curl -fsSL "https://www.ugrant.sh/install?target=${TARGET}&kind=minisig" -o "${ARCHIVE}.minisig"
+curl -fsSLo minisign.pub https://www.ugrant.sh/minisign.pub
+
+minisign -Vm "$ARCHIVE" -p minisign.pub -x "${ARCHIVE}.minisig"
+```
+
+## What not to assume
+
+Do not assume:
+
+- OAuth consent is invisible or automatic
+- all providers behave identically
+- install verification should be skipped for convenience
+- the marketing homepage contains full operational guidance
+
+Use this file for the machine path. Use the homepage for the human path.

@@ -1,0 +1,77 @@
+# ugrant agent quickstart
+
+Use this file when an AI agent needs to start using `ugrant`.
+
+Full guide: https://www.ugrant.sh/llms-full.txt
+Repo for coding agents: https://github.com/anulman/ugrant
+
+## What ugrant is
+
+`ugrant` is a local OAuth 2.0 token broker and exec wrapper for scripts, shell tools, CLIs, and local daemons.
+
+It keeps grant material local, refreshes access tokens on use, and injects only child-safe environment variables into the downstream process.
+
+## Intended agent flow
+
+1. Install `ugrant`
+2. Run `ugrant init`
+3. Run `ugrant profile add ...`
+4. Run `ugrant login --profile ...`
+5. Pause for human OAuth consent if needed
+6. Resume and run the target command with `ugrant exec --profile ... -- <command>`
+
+## Install
+
+```bash
+curl -fsSLo /tmp/ugrant-install.sh https://www.ugrant.sh/install.sh && sh /tmp/ugrant-install.sh
+```
+
+The installer prefers minisign verification when `minisign` is available, and falls back to checksum verification for compatibility.
+
+## Consent boundary
+
+Do not assume OAuth consent is fully autonomous.
+
+Agents can handle setup and command wiring, but the human may still need to complete approval in the browser during `ugrant login`.
+
+## Core commands
+
+Initialize state:
+
+```bash
+ugrant init
+```
+
+Add a Google IMAP profile:
+
+```bash
+ugrant profile add \
+  --name gmail \
+  --service google-imap \
+  --client-id <id> \
+  --client-secret <secret>
+```
+
+Log in:
+
+```bash
+ugrant login --profile gmail
+```
+
+Run a downstream tool with injected credentials:
+
+```bash
+ugrant exec --profile gmail -- python sync_mail.py
+```
+
+Inspect status:
+
+```bash
+ugrant status --profile gmail
+```
+
+Run diagnostics:
+
+```bash
+ugrant doctor
+```

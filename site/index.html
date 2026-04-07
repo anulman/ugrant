@@ -43,6 +43,7 @@
         <nav class="top-nav" aria-label="Primary">
           <a href="#install">Install</a>
           <a href="#quick-start">Quick start</a>
+          <a href="#for-agents">For agents</a>
           <a href="#verify">Verify</a>
           <a href="#why">Why</a>
           <a href="https://github.com/anulman/ugrant" target="_blank" rel="noreferrer">GitHub</a>
@@ -58,7 +59,7 @@
               <strong>ugrant</strong> is a small local token broker for scripts, shell tools, and CLIs that need OAuth without becoming their own credential manager.
             </p>
             <p class="sublede">
-              Secure local token custody, refresh, and env injection, with minisign-signed releases, a checksum fallback, and no daemon required for the MVP.
+              Secure local token custody, refresh, and env injection, with minisign-signed releases, a checksum fallback, and no daemon required.
             </p>
 
             <div class="install-callout" id="install">
@@ -69,7 +70,7 @@
 
             <div class="hero-actions">
               <a class="button primary" href="#quick-start">Quick start</a>
-              <a class="button secondary" href="#verify">Verify a release</a>
+              <a class="button secondary" href="/llms.txt">For agents</a>
             </div>
 
             <ul class="hero-points">
@@ -129,6 +130,27 @@
             <article class="code-card">
               <h3>4. Run your tool</h3>
               <pre><code>ugrant exec --profile gmail -- python sync_mail.py</code></pre>
+            </article>
+          </div>
+        </section>
+
+        <section class="section" id="for-agents">
+          <div class="section-heading">
+            <p class="eyebrow">For agents</p>
+            <h2>Point use-agents at <code>/llms.txt</code>. Point coding agents at the repo's <code>AGENTS.md</code>.</h2>
+          </div>
+
+          <div class="code-grid">
+            <article class="code-card">
+              <h3>Use-agent entrypoint</h3>
+              <pre><code>https://www.ugrant.sh/llms.txt</code></pre>
+              <p>Install, verify, initialize, add a profile, stop for human OAuth consent, then resume with <code>ugrant exec</code>.</p>
+            </article>
+
+            <article class="code-card">
+              <h3>Coding-agent entrypoint</h3>
+              <pre><code>https://github.com/anulman/ugrant</code></pre>
+              <p>Have the agent read <code>AGENTS.md</code> first for build, test, release, and site coupling notes.</p>
             </article>
           </div>
         </section>
@@ -207,6 +229,7 @@ curl -fsSLo minisign.pub https://www.ugrant.sh/minisign.pub</code></pre>
         <div class="footer-links">
           <a href="https://github.com/anulman/ugrant" target="_blank" rel="noreferrer">GitHub</a>
           <a href="#install">Install</a>
+          <a href="#for-agents">For agents</a>
           <a href="#verify">Verify</a>
         </div>
       </footer>
