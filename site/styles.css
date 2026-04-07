@@ -31,6 +31,7 @@ body {
     radial-gradient(circle at top right, rgba(231, 238, 217, 0.65), transparent 26%),
     var(--bg);
   line-height: 1.55;
+  overflow-x: hidden;
 }
 
 img {
@@ -92,6 +93,14 @@ a {
   padding: 1.5rem 0 2rem;
 }
 
+.hero-copy,
+.section-heading,
+.strip-card,
+.code-card,
+.feature-card {
+  min-width: 0;
+}
+
 .eyebrow {
   margin: 0 0 0.65rem;
   font-size: 0.82rem;
@@ -113,6 +122,8 @@ h1 {
   line-height: 0.95;
   letter-spacing: -0.04em;
   margin-bottom: 1rem;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
 }
 
 h2 {
@@ -165,6 +176,7 @@ h3 {
 
 pre {
   overflow-x: auto;
+  max-width: 100%;
   margin: 0;
   padding: 1rem 1.1rem;
   border-radius: 14px;
@@ -321,7 +333,7 @@ pre {
 
 @media (max-width: 640px) {
   .page-shell {
-    width: min(calc(100% - 1.2rem), var(--page-width));
+    width: min(calc(100% - 1rem), var(--page-width));
   }
 
   .site-header,
@@ -330,8 +342,41 @@ pre {
     flex-direction: column;
   }
 
+  .top-nav,
+  .hero-actions {
+    width: 100%;
+  }
+
+  .top-nav {
+    gap: 0.85rem;
+  }
+
   h1 {
-    line-height: 1;
+    font-size: clamp(2rem, 12vw, 2.9rem);
+    line-height: 0.98;
+    letter-spacing: -0.05em;
+    text-wrap: pretty;
+  }
+
+  .lede,
+  .sublede {
+    font-size: 1rem;
+  }
+
+  .install-callout {
+    padding: 0.9rem;
+  }
+
+  pre {
+    font-size: 0.82rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+
+  .button {
+    flex: 1 1 220px;
   }
 
   .install-callout,
