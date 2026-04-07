@@ -1,7 +1,7 @@
 const GITHUB_REPO = "https://github.com/anulman/ugrant";
 const GITHUB_API_LATEST = "https://api.github.com/repos/anulman/ugrant/releases/latest";
 const WWW_HOST = "www.ugrant.sh";
-const SUPPORTED_TARGETS = new Set(["linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64"]);
+const SUPPORTED_TARGETS = new Set(["linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64", "windows-x86_64"]);
 const MINISIGN_PUBLIC_KEY_COMMENT = "minisign public key for ugrant releases";
 const MINISIGN_PUBLIC_KEY = "RWROMGoscMzrnBn4DAQctEu3E+Y5totRluTj+M/IT0w6ZIuaNjkepTAB";
 const MINISIGN_PUBLIC_KEY_FILE = `untrusted comment: ${MINISIGN_PUBLIC_KEY_COMMENT}\n${MINISIGN_PUBLIC_KEY}\n`;
@@ -9,6 +9,9 @@ const INSTALL_KIND_SUFFIX = {
   archive: "",
   sha256: ".sha256",
   minisig: ".minisig",
+};
+const TARGET_ARCHIVE_EXTENSION = {
+  "windows-x86_64": ".zip",
 };
 
 export default {
@@ -37,6 +40,15 @@ export default {
       return new Response(INSTALL_SCRIPT, {
         headers: {
           "content-type": "text/x-shellscript; charset=utf-8",
+          "cache-control": "public, max-age=300",
+        },
+      });
+    }
+
+    if (url.pathname === "/install.ps1") {
+      return new Response(WINDOWS_INSTALL_SCRIPT, {
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
           "cache-control": "public, max-age=300",
         },
       });
@@ -85,7 +97,7 @@ async function redirectInstall(request) {
       return new Response("Latest GitHub release is missing a tag name.", { status: 502 });
     }
 
-    const expectedName = `ugrant-${tag}-${target}.tar.gz${INSTALL_KIND_SUFFIX[kind]}`;
+    const expectedName = installArtifactName(tag, target, kind);
     const match = assets.find((asset) => typeof asset?.name === "string" && asset.name === expectedName);
     if (match?.browser_download_url) {
       return Response.redirect(match.browser_download_url, 302);
@@ -103,17 +115,27 @@ function normalizeInstallKind(kind) {
   return "archive";
 }
 
+function archiveExtensionForTarget(target) {
+  return TARGET_ARCHIVE_EXTENSION[target] || ".tar.gz";
+}
+
+function installArtifactName(tag, target, kind) {
+  return `ugrant-${tag}-${target}${archiveExtensionForTarget(target)}${INSTALL_KIND_SUFFIX[kind]}`;
+}
+
 function normalizeTarget(target) {
   return SUPPORTED_TARGETS.has(target) ? target : null;
 }
 
 function pickRequestedArtifact(userAgent) {
   const ua = userAgent.toLowerCase();
+  const isWindows = /windows nt/.test(ua);
   const isMac = /mac os x|macintosh|darwin/.test(ua);
   const isLinux = /linux/.test(ua) && !/android/.test(ua);
   const isArm64 = /arm64|aarch64/.test(ua) || /mac os x.*arm|applewebkit.*arm/.test(ua);
   const isX64 = /x86_64|win64|x64|amd64|intel/.test(ua);
 
+  if (isWindows && isX64 && !isArm64) return "windows-x86_64";
   if (isMac && isArm64) return "macos-arm64";
   if (isMac && isX64) return "macos-x86_64";
   if (isLinux && isArm64) return "linux-aarch64";
@@ -203,7 +225,7 @@ verify_checksum() {
 }
 
 verify_archive() {
-  if command -v minisign >/dev/null 2>&1 && [ "$MINISIGN_PUBLIC_KEY" != "RWROMGoscMzrnBn4DAQctEu3E+Y5totRluTj+M/IT0w6ZIuaNjkepTAB" ]; then
+  if command -v minisign >/dev/null 2>&1; then
     download_signature
     minisign -Vm "$archive" -P "$MINISIGN_PUBLIC_KEY" -x "$signature"
     verification_summary="Verified release signature with minisign"
@@ -240,4 +262,107 @@ chmod +x "$install_dir/ugrant"
 echo "Installed ugrant to $install_dir/ugrant"
 echo "$verification_summary"
 echo "Make sure $install_dir is on your PATH"
+`;
+
+const WINDOWS_INSTALL_SCRIPT = String.raw`$ErrorActionPreference = "Stop"
+
+$BaseUrl = "https://www.ugrant.sh"
+$MinisignPublicKey = "RWROMGoscMzrnBn4DAQctEu3E+Y5totRluTj+M/IT0w6ZIuaNjkepTAB"
+$verificationSummary = ""
+
+switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
+  "X64" { $target = "windows-x86_64" }
+  default {
+    Write-Host "See https://github.com/anulman/ugrant/releases/latest"
+    throw "Unsupported Windows architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+  }
+}
+
+$tmpdir = Join-Path ([System.IO.Path]::GetTempPath()) ("ugrant-install-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $tmpdir -Force | Out-Null
+
+try {
+  $archive = Join-Path $tmpdir "ugrant.zip"
+  $signature = Join-Path $tmpdir "ugrant.zip.minisig"
+  $checksum = Join-Path $tmpdir "ugrant.zip.sha256"
+
+  function Download-Archive {
+    Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/install?target=$target" -OutFile $archive
+  }
+
+  function Download-Signature {
+    Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/install?target=$target&kind=minisig" -OutFile $signature
+  }
+
+  function Download-Checksum {
+    Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/install?target=$target&kind=sha256" -OutFile $checksum
+  }
+
+  function Verify-Checksum {
+    $expected = (Get-Content $checksum -Raw).Trim().Split()[0].ToLowerInvariant()
+    $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+    if ($expected -ne $actual) {
+      throw "Checksum verification failed"
+    }
+  }
+
+  function Verify-Archive {
+    $minisign = Get-Command minisign -ErrorAction SilentlyContinue
+    if (-not $minisign) {
+      $minisign = Get-Command minisign.exe -ErrorAction SilentlyContinue
+    }
+
+    if ($minisign) {
+      Download-Signature
+      & $minisign.Source -Vm $archive -P $MinisignPublicKey -x $signature | Out-Null
+      $script:verificationSummary = "Verified release signature with minisign"
+      return
+    }
+
+    Write-Warning "minisign not found, falling back to checksum verification. Install minisign for stronger release authenticity checks."
+    Download-Checksum
+    Verify-Checksum
+    $script:verificationSummary = "Verified archive checksum (compatibility fallback)"
+  }
+
+  Download-Archive
+  Verify-Archive
+
+  Expand-Archive -Path $archive -DestinationPath $tmpdir -Force
+
+  $binary = Get-ChildItem -Path $tmpdir -Recurse -Filter "ugrant.exe" | Select-Object -First 1
+  if (-not $binary) {
+    throw "Could not find ugrant.exe in downloaded archive"
+  }
+
+  $installDir = Join-Path $env:LOCALAPPDATA "Programs\ugrant\bin"
+  $destination = Join-Path $installDir "ugrant.exe"
+
+  New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+  Copy-Item $binary.FullName -Destination $destination -Force
+
+  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  $pathEntries = @()
+  if ($userPath) {
+    $pathEntries = $userPath -split ';' | Where-Object { $_ }
+  }
+
+  $pathAdded = $false
+  if (-not ($pathEntries | Where-Object { $_.TrimEnd('\\') -ieq $installDir.TrimEnd('\\') })) {
+    $newUserPath = if ($userPath) { "$userPath;$installDir" } else { $installDir }
+    [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+    $pathAdded = $true
+  }
+
+  Write-Host "Installed ugrant to $destination"
+  Write-Host $verificationSummary
+  if ($pathAdded) {
+    Write-Host "Added $installDir to your user PATH. Open a new PowerShell window to use ugrant."
+  } else {
+    Write-Host "$installDir is already on your user PATH."
+  }
+}
+finally {
+  Remove-Item $tmpdir -Recurse -Force -ErrorAction SilentlyContinue
+}
 `;

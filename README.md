@@ -76,17 +76,27 @@ That split matters. Agents can handle setup, but OAuth approval is still a human
 
 ## Install
 
+macOS and Linux:
+
 ```bash
 curl -fsSLo /tmp/ugrant-install.sh https://www.ugrant.sh/install.sh && sh /tmp/ugrant-install.sh
 ```
 
-The install script prefers minisign verification when `minisign` is available. If not, it falls back to the matching `.sha256` file with a blunt warning so older environments still work.
+Windows PowerShell:
+
+```powershell
+irm https://www.ugrant.sh/install.ps1 | iex
+```
+
+Both installers prefer minisign verification when `minisign` is available. If not, they fall back to the matching `.sha256` file with a blunt warning so older environments still work.
 
 ## Verify a release manually
 
 ### Preferred: minisign
 
 Minisign is the preferred authenticity check for published archives.
+
+Windows releases use `.zip` archives, for example `TARGET=windows-x86_64` with `ARCHIVE="ugrant-${TAG}-${TARGET}.zip"`.
 
 ```bash
 TAG=v0.1.0

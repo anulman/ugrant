@@ -45,27 +45,73 @@ jobs:
       - name: Build
         run: zig build -Doptimize=ReleaseSafe
 
-      - name: Package artifact
+      - name: Package artifact (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          ARCH="$(uname -m)"
-          NAME="ugrant-${{ github.event.inputs.tag }}-${{ matrix.artifact_os }}-${ARCH}"
-          PKGDIR="dist/${NAME}"
-          BIN_NAME="ugrant"
-          PKG_BIN_NAME="ugrant"
+          case "$(uname -m)" in
+            x86_64|amd64) ARCH="x86_64" ;;
+            arm64|aarch64)
+              if [ "${{ matrix.artifact_os }}" = "linux" ]; then
+                ARCH="aarch64"
+              else
+                ARCH="arm64"
+              fi
+              ;;
+            *)
+              echo "Unsupported release architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
 
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            BIN_NAME="ugrant.exe"
-            PKG_BIN_NAME="ugrant.exe"
-          fi
+          TARGET="${{ matrix.artifact_os }}-${ARCH}"
+          NAME="ugrant-${{ github.event.inputs.tag }}-${TARGET}"
+          PKGDIR="dist/${NAME}"
 
           mkdir -p "$PKGDIR"
-          cp "zig-out/bin/${BIN_NAME}" "$PKGDIR/${PKG_BIN_NAME}"
+          cp zig-out/bin/ugrant "$PKGDIR/ugrant"
           cp README.md LICENSE SPEC.md "$PKGDIR/"
           tar -C dist -czf "dist/${NAME}.tar.gz" "$NAME"
-          shasum -a 256 "dist/${NAME}.tar.gz" > "dist/${NAME}.tar.gz.sha256"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "dist/${NAME}.tar.gz" > "dist/${NAME}.tar.gz.sha256"
+          else
+            shasum -a 256 "dist/${NAME}.tar.gz" > "dist/${NAME}.tar.gz.sha256"
+          fi
+
+      - name: Package artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+
+          switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
+            'X64' { $arch = 'x86_64' }
+            'Arm64' { $arch = 'arm64' }
+            default { throw "Unsupported release architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
+          }
+
+          $target = "windows-$arch"
+          $name = "ugrant-${{ github.event.inputs.tag }}-$target"
+          $pkgdir = Join-Path 'dist' $name
+          $archive = Join-Path 'dist' "$name.zip"
+
+          New-Item -ItemType Directory -Path $pkgdir -Force | Out-Null
+          Copy-Item 'zig-out/bin/ugrant.exe' -Destination (Join-Path $pkgdir 'ugrant.exe')
+          Copy-Item README.md, LICENSE, SPEC.md -Destination $pkgdir
+
+          if (Test-Path $archive) {
+            Remove-Item $archive -Force
+          }
+
+          Compress-Archive -Path $pkgdir -DestinationPath $archive
+
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          Set-Content -Path "$archive.sha256" -Value "$hash  $([System.IO.Path]::GetFileName($archive))" -NoNewline
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -138,7 +184,7 @@ jobs:
             found_archive=true
             minisign -Sm "$archive" -s "$key_file" -x "$archive.minisig" -c "signature for $(basename "$archive")" -t "ugrant release ${TAG}"
             minisign -Vm "$archive" -p minisign.pub -x "$archive.minisig" >/dev/null
-          done < <(find dist -maxdepth 1 -type f -name '*.tar.gz' -print0 | sort -z)
+          done < <(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0 | sort -z)
 
           if [ "$found_archive" = false ]; then
             echo "No release archives found in dist/" >&2

@@ -65,7 +65,8 @@
             <div class="install-callout" id="install">
               <p class="install-label">Install</p>
               <pre><code>curl -fsSLo /tmp/ugrant-install.sh https://www.ugrant.sh/install.sh && sh /tmp/ugrant-install.sh</code></pre>
-              <p>The installer prefers minisign verification automatically when `minisign` is present.</p>
+              <p><code>irm https://www.ugrant.sh/install.ps1 | iex</code> for Windows PowerShell.</p>
+              <p>The installers prefer minisign verification automatically when <code>minisign</code> is present.</p>
             </div>
 
             <div class="hero-actions">
@@ -171,6 +172,7 @@ ARCHIVE="ugrant-${TAG}-${TARGET}.tar.gz"
 curl -fsSL "https://www.ugrant.sh/install?target=${TARGET}" -o "$ARCHIVE"
 curl -fsSL "https://www.ugrant.sh/install?target=${TARGET}&amp;kind=minisig" -o "${ARCHIVE}.minisig"
 curl -fsSLo minisign.pub https://www.ugrant.sh/minisign.pub</code></pre>
+              <p>Windows artifacts use the same target naming, but ship as <code>.zip</code> archives.</p>
             </article>
 
             <article class="code-card">
