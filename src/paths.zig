@@ -202,6 +202,7 @@ pub fn backendAvailable(allocator: std.mem.Allocator, backend: []const u8) bool 
     }
     if (std.mem.eql(u8, backend, "platform-secure-store")) {
         if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return true;
+        if (builtin.os.tag == .windows) return true;
         return commandExists(allocator, "secret-tool") and envVarExists("DBUS_SESSION_BUS_ADDRESS");
     }
     if (std.mem.eql(u8, backend, "passphrase")) return true;
@@ -251,6 +252,13 @@ test "platform-secure-store resolves to strongest Linux backend" {
     try std.testing.expectEqualStrings("tpm2", try resolveBackendChoice("platform-secure-store", false, true, true));
     try std.testing.expectEqualStrings("platform-secure-store", try resolveBackendChoice("platform-secure-store", false, false, true));
     try std.testing.expectError(error.WrapBackendUnavailable, resolveBackendChoice("platform-secure-store", false, false, false));
+}
+
+test "platform secure store is always available on windows" {
+    if (builtin.os.tag != .windows) return;
+
+    try std.testing.expect(backendAvailable(std.testing.allocator, "platform-secure-store"));
+    try std.testing.expectEqualStrings("platform-secure-store", try chooseInitBackend(std.testing.allocator, null, false));
 }
 
 test "default backend selection still prefers strongest available backend" {

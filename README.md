@@ -12,6 +12,8 @@ It keeps grant material local, encrypts secret fields at rest, refreshes access 
 
 Recent hardening includes Argon2id passphrase wrapping, 0700/0600 secret-state permissions on Unix, state-validated manual login fallback, concurrent refresh leasing, minisign-signed release archives with checksum fallback installs, and bundled SQLite builds across Linux, macOS, and Windows.
 
+On Linux, `platform-secure-store` uses Secret Service when available and still prefers TPM2 when present. On Windows, `platform-secure-store` now uses user-scoped DPAPI for local wrap-secret custody.
+
 ## What it does
 
 - Local OAuth login with stored refresh-token custody

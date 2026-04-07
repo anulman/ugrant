@@ -9,6 +9,10 @@ const c = @cImport({
     if (builtin.os.tag != .windows) {
         @cInclude("termios.h");
         @cInclude("unistd.h");
+    } else {
+        @cDefine("WIN32_LEAN_AND_MEAN", "1");
+        @cInclude("windows.h");
+        @cInclude("wincrypt.h");
     }
 });
 
@@ -32,6 +36,7 @@ const gcm_nonce_len = 12;
 const gcm_tag_len = 16;
 const argon2_params = crypto.pwhash.argon2.Params.owasp_2id;
 const argon2_kdf_name = "argon2id-v19";
+const dpapi_entropy = "ugrant-dpapi-wrap-v1";
 const schema_version = 3;
 
 const WrappedDekRecord = struct {
@@ -1090,10 +1095,59 @@ fn freeWrappedDekRecord(allocator: std.mem.Allocator, record: WrappedDekRecord) 
     if (record.tpm2_priv_b64) |v| allocator.free(v);
 }
 
+fn freeWrapSecret(allocator: std.mem.Allocator, wrap: WrapSecret) void {
+    freeSecret(allocator, wrap.secret);
+    if (wrap.secret_ref) |v| allocator.free(v);
+    if (wrap.tpm2_pub_b64) |v| allocator.free(v);
+    if (wrap.tpm2_priv_b64) |v| allocator.free(v);
+}
+
+fn dpapiDataBlob(bytes: []const u8) c.DATA_BLOB {
+    return .{
+        .cbData = @as(c.DWORD, @intCast(bytes.len)),
+        .pbData = if (bytes.len == 0) null else @as([*c]u8, @ptrCast(@constCast(bytes.ptr))),
+    };
+}
+
+fn protectDpapiBytes(allocator: std.mem.Allocator, plaintext: []const u8) ![]u8 {
+    if (builtin.os.tag != .windows) return error.WrapBackendUnavailable;
+
+    var input = dpapiDataBlob(plaintext);
+    var entropy = dpapiDataBlob(dpapi_entropy);
+    var output: c.DATA_BLOB = std.mem.zeroes(c.DATA_BLOB);
+    if (c.CryptProtectData(&input, null, &entropy, null, null, c.CRYPTPROTECT_UI_FORBIDDEN, &output) == 0) {
+        return error.WrapBackendUnavailable;
+    }
+    defer _ = c.LocalFree(output.pbData);
+
+    const protected_slice = @as([*]u8, @ptrCast(output.pbData))[0..output.cbData];
+    return allocator.dupe(u8, protected_slice);
+}
+
+fn unprotectDpapiBytes(allocator: std.mem.Allocator, protected: []const u8) ![]u8 {
+    if (builtin.os.tag != .windows) return error.WrapBackendUnavailable;
+
+    var input = dpapiDataBlob(protected);
+    var entropy = dpapiDataBlob(dpapi_entropy);
+    var output: c.DATA_BLOB = std.mem.zeroes(c.DATA_BLOB);
+    if (c.CryptUnprotectData(&input, null, &entropy, null, null, c.CRYPTPROTECT_UI_FORBIDDEN, &output) == 0) {
+        return error.WrapBackendUnavailable;
+    }
+    defer _ = c.LocalFree(output.pbData);
+
+    const plaintext_slice = @as([*]u8, @ptrCast(output.pbData))[0..output.cbData];
+    return allocator.dupe(u8, plaintext_slice);
+}
+
 fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8, record: ?WrappedDekRecord) !WrapSecret {
     if (record) |existing| {
         const secret_ref = existing.secret_ref orelse return error.InvalidWrappedDek;
         if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return .{ .secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_PLATFORM_STORE_SECRET", "platform-store-test-secret"), .secret_ref = try allocator.dupe(u8, secret_ref) };
+        if (builtin.os.tag == .windows) {
+            const protected = try b64DecodeAlloc(allocator, secret_ref);
+            defer allocator.free(protected);
+            return .{ .secret = try unprotectDpapiBytes(allocator, protected), .secret_ref = try allocator.dupe(u8, secret_ref) };
+        }
         const result = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "secret-tool", "lookup", "service", "ugrant", "secret_ref", secret_ref }, .max_output_bytes = 4096 });
         defer allocator.free(result.stderr);
         switch (result.term) {
@@ -1106,6 +1160,14 @@ fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8,
     }
     const ref = try randomUrlSafe(allocator, 18);
     if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return .{ .secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_PLATFORM_STORE_SECRET", "platform-store-test-secret"), .secret_ref = ref };
+    if (builtin.os.tag == .windows) {
+        const secret = try randomUrlSafe(allocator, 32);
+        errdefer freeSecret(allocator, secret);
+        const protected = try protectDpapiBytes(allocator, secret);
+        defer allocator.free(protected);
+        allocator.free(ref);
+        return .{ .secret = secret, .secret_ref = try b64EncodeAlloc(allocator, protected) };
+    }
     const secret = try randomUrlSafe(allocator, 32);
     errdefer freeSecret(allocator, secret);
     const key_path = keys_path orelse return error.InvalidArgs;
@@ -2438,6 +2500,39 @@ test "wrapped dek metadata round trips optional backend fields" {
     try std.testing.expectEqualStrings("priv", loaded.tpm2_priv_b64.?);
 }
 
+test "windows platform secure store round trips via DPAPI" {
+    if (builtin.os.tag != .windows or envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return;
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const keys_path = try std.fs.path.join(allocator, &.{ base, "keys.json" });
+    defer allocator.free(keys_path);
+
+    const created = try platformStoreWrapSecret(allocator, keys_path, null);
+    defer freeWrapSecret(allocator, created);
+    try std.testing.expect(created.secret_ref != null);
+
+    const record = WrappedDekRecord{
+        .version = 3,
+        .backend = try allocator.dupe(u8, "platform-secure-store"),
+        .key_version = 1,
+        .salt_b64 = try allocator.dupe(u8, "salt"),
+        .nonce_b64 = try allocator.dupe(u8, "nonce"),
+        .ciphertext_b64 = try allocator.dupe(u8, "cipher"),
+        .created_at = try allocator.dupe(u8, "123"),
+        .secret_ref = try allocator.dupe(u8, created.secret_ref.?),
+    };
+    defer freeWrappedDekRecord(allocator, record);
+
+    const loaded = try platformStoreWrapSecret(allocator, null, record);
+    defer freeWrapSecret(allocator, loaded);
+    try std.testing.expectEqualStrings(created.secret, loaded.secret);
+    try std.testing.expectEqualStrings(created.secret_ref.?, loaded.secret_ref.?);
+}
+
 test "legacy wrapped dek records remain readable" {
     const allocator = std.testing.allocator;
     var salt: [kdf_salt_len]u8 = [_]u8{0x11} ** kdf_salt_len;
@@ -2786,9 +2881,10 @@ test "rekey can switch from insecure-keyfile to resolved platform-secure-store b
     defer vault.deinit(allocator);
 
     const target_backend = try resolveBackendChoice("platform-secure-store", false, true, true);
+    const target_secret_ref: ?[]const u8 = if (std.mem.eql(u8, target_backend, "platform-secure-store")) "platform-ref-1" else null;
     const target_tpm2_pub: ?[]const u8 = if (std.mem.eql(u8, target_backend, "tpm2")) "dHBtMi1wdWI=" else null;
     const target_tpm2_priv: ?[]const u8 = if (std.mem.eql(u8, target_backend, "tpm2")) "dHBtMi1wcml2" else null;
-    const stats = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", target_backend, "tpm2-test-secret", null, target_tpm2_pub, target_tpm2_priv);
+    const stats = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", target_backend, "tpm2-test-secret", target_secret_ref, target_tpm2_pub, target_tpm2_priv);
     try std.testing.expectEqual(@as(u32, 2), stats.key_version);
 
     const updated_record = try loadWrappedDek(allocator, vault.keys_path);
@@ -2798,6 +2894,7 @@ test "rekey can switch from insecure-keyfile to resolved platform-secure-store b
         try std.testing.expectEqualStrings("dHBtMi1wdWI=", updated_record.tpm2_pub_b64.?);
         try std.testing.expectEqualStrings("dHBtMi1wcml2", updated_record.tpm2_priv_b64.?);
     } else {
+        try std.testing.expectEqualStrings("platform-ref-1", updated_record.secret_ref.?);
         try std.testing.expect(updated_record.tpm2_pub_b64 == null);
         try std.testing.expect(updated_record.tpm2_priv_b64 == null);
     }

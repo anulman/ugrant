@@ -13,6 +13,12 @@ fn addSqlite(step: *std.Build.Step.Compile, b: *std.Build) void {
     });
 }
 
+fn addPlatformLibs(step: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag == .windows) {
+        step.linkSystemLibrary("crypt32");
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -29,6 +35,7 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
     addSqlite(exe, b);
+    addPlatformLibs(exe, target);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -49,6 +56,7 @@ pub fn build(b: *std.Build) void {
         .root_module = test_mod,
     });
     addSqlite(unit_tests, b);
+    addPlatformLibs(unit_tests, target);
 
     const test_run = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
