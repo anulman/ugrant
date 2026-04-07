@@ -10,7 +10,7 @@
 
 It keeps grant material local, encrypts secret fields at rest, refreshes access tokens on use, and injects only the child-safe environment a tool actually needs.
 
-Recent hardening includes Argon2id passphrase wrapping, 0700/0600 secret-state permissions on Unix, state-validated manual login fallback, concurrent refresh leasing, and minisign-signed release archives with checksum fallback installs.
+Recent hardening includes Argon2id passphrase wrapping, 0700/0600 secret-state permissions on Unix, state-validated manual login fallback, concurrent refresh leasing, minisign-signed release archives with checksum fallback installs, and bundled SQLite builds across Linux, macOS, and Windows.
 
 ## What it does
 
@@ -26,8 +26,9 @@ Recent hardening includes Argon2id passphrase wrapping, 0700/0600 secret-state p
 Requirements:
 
 - Zig 0.15.2+
-- SQLite development headers / library (`libsqlite3-dev` on Debian/Ubuntu)
 - Python 3 (used for OAuth helper flows)
+
+`ugrant` vendors the SQLite amalgamation, so you do not need separate SQLite headers or libraries on Linux, macOS, or Windows.
 
 Build:
 
@@ -38,7 +39,7 @@ zig build -Doptimize=ReleaseSafe
 Test:
 
 ```bash
-zig test src/main.zig -lc -lsqlite3
+zig build test
 ```
 
 ## Quick start
@@ -81,6 +82,8 @@ The install script prefers minisign verification when `minisign` is available. I
 
 ## Verify a release manually
 
+### Preferred: minisign
+
 Minisign is the preferred authenticity check for published archives.
 
 ```bash
@@ -95,7 +98,7 @@ curl -fsSLo minisign.pub https://www.ugrant.sh/minisign.pub
 minisign -Vm "$ARCHIVE" -p minisign.pub -x "${ARCHIVE}.minisig"
 ```
 
-For environments without `minisign`, the matching checksum remains available:
+### Compatibility fallback: sha256
 
 ```bash
 curl -fsSL "https://www.ugrant.sh/install?target=${TARGET}&kind=sha256" -o "${ARCHIVE}.sha256"

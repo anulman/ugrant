@@ -6,8 +6,10 @@ const pathing = @import("paths.zig");
 const service = @import("service.zig");
 const c = @cImport({
     @cInclude("sqlite3.h");
-    @cInclude("termios.h");
-    @cInclude("unistd.h");
+    if (builtin.os.tag != .windows) {
+        @cInclude("termios.h");
+        @cInclude("unistd.h");
+    }
 });
 
 const version = cli.version;
@@ -899,6 +901,13 @@ fn envTruthy(name: []const u8) bool {
     return pathing.envTruthy(name);
 }
 
+fn getEnvOrDefaultOwned(allocator: std.mem.Allocator, name: []const u8, fallback: []const u8) ![]u8 {
+    return std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => allocator.dupe(u8, fallback),
+        else => err,
+    };
+}
+
 fn backendAvailable(allocator: std.mem.Allocator, backend: []const u8) bool {
     return pathing.backendAvailable(allocator, backend);
 }
@@ -1084,7 +1093,7 @@ fn freeWrappedDekRecord(allocator: std.mem.Allocator, record: WrappedDekRecord) 
 fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8, record: ?WrappedDekRecord) !WrapSecret {
     if (record) |existing| {
         const secret_ref = existing.secret_ref orelse return error.InvalidWrappedDek;
-        if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return .{ .secret = try allocator.dupe(u8, std.posix.getenv("UGRANT_TEST_PLATFORM_STORE_SECRET") orelse "platform-store-test-secret"), .secret_ref = try allocator.dupe(u8, secret_ref) };
+        if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return .{ .secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_PLATFORM_STORE_SECRET", "platform-store-test-secret"), .secret_ref = try allocator.dupe(u8, secret_ref) };
         const result = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "secret-tool", "lookup", "service", "ugrant", "secret_ref", secret_ref }, .max_output_bytes = 4096 });
         defer allocator.free(result.stderr);
         switch (result.term) {
@@ -1096,7 +1105,7 @@ fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8,
         return .{ .secret = secret, .secret_ref = try allocator.dupe(u8, secret_ref) };
     }
     const ref = try randomUrlSafe(allocator, 18);
-    if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return .{ .secret = try allocator.dupe(u8, std.posix.getenv("UGRANT_TEST_PLATFORM_STORE_SECRET") orelse "platform-store-test-secret"), .secret_ref = ref };
+    if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return .{ .secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_PLATFORM_STORE_SECRET", "platform-store-test-secret"), .secret_ref = ref };
     const secret = try randomUrlSafe(allocator, 32);
     errdefer freeSecret(allocator, secret);
     const key_path = keys_path orelse return error.InvalidArgs;
@@ -1112,12 +1121,12 @@ fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8,
 
 fn tpm2WrapSecret(allocator: std.mem.Allocator, record: ?WrappedDekRecord) !WrapSecret {
     if (record) |existing| {
-        if (envTruthy("UGRANT_TEST_TPM2_AVAILABLE")) return .{ .secret = try allocator.dupe(u8, std.posix.getenv("UGRANT_TEST_TPM2_SECRET") orelse "tpm2-test-secret"), .tpm2_pub_b64 = try allocator.dupe(u8, existing.tpm2_pub_b64.?), .tpm2_priv_b64 = try allocator.dupe(u8, existing.tpm2_priv_b64.?) };
+        if (envTruthy("UGRANT_TEST_TPM2_AVAILABLE")) return .{ .secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_TPM2_SECRET", "tpm2-test-secret"), .tpm2_pub_b64 = try allocator.dupe(u8, existing.tpm2_pub_b64.?), .tpm2_priv_b64 = try allocator.dupe(u8, existing.tpm2_priv_b64.?) };
         const pub_blob = existing.tpm2_pub_b64 orelse return error.InvalidWrappedDek;
         const priv_blob = existing.tpm2_priv_b64 orelse return error.InvalidWrappedDek;
         return unsealTpm2Secret(allocator, pub_blob, priv_blob);
     }
-    const secret = if (envTruthy("UGRANT_TEST_TPM2_AVAILABLE")) try allocator.dupe(u8, std.posix.getenv("UGRANT_TEST_TPM2_SECRET") orelse "tpm2-test-secret") else try randomUrlSafe(allocator, 32);
+    const secret = if (envTruthy("UGRANT_TEST_TPM2_AVAILABLE")) try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_TPM2_SECRET", "tpm2-test-secret") else try randomUrlSafe(allocator, 32);
     errdefer freeSecret(allocator, secret);
     if (envTruthy("UGRANT_TEST_TPM2_AVAILABLE")) return .{ .secret = secret, .tpm2_pub_b64 = try allocator.dupe(u8, "dHBtMi1wdWI="), .tpm2_priv_b64 = try allocator.dupe(u8, "dHBtMi1wcml2") };
     return sealTpm2Secret(allocator, secret);
@@ -1574,20 +1583,22 @@ fn promptSecret(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
     var stdout_file = std.fs.File.stdout();
     try stdout_file.writeAll(prompt);
 
-    var restored = false;
-    var original_termios: c.termios = undefined;
-    if (c.isatty(c.STDIN_FILENO) == 1) {
-        if (c.tcgetattr(c.STDIN_FILENO, &original_termios) == 0) {
-            var hidden = original_termios;
-            hidden.c_lflag &= ~@as(@TypeOf(hidden.c_lflag), c.ECHO);
-            _ = c.tcsetattr(c.STDIN_FILENO, c.TCSANOW, &hidden);
-            restored = true;
+    if (builtin.os.tag != .windows) {
+        var restored = false;
+        var original_termios: c.termios = undefined;
+        if (c.isatty(c.STDIN_FILENO) == 1) {
+            if (c.tcgetattr(c.STDIN_FILENO, &original_termios) == 0) {
+                var hidden = original_termios;
+                hidden.c_lflag &= ~@as(@TypeOf(hidden.c_lflag), c.ECHO);
+                _ = c.tcsetattr(c.STDIN_FILENO, c.TCSANOW, &hidden);
+                restored = true;
+            }
         }
-    }
-    defer {
-        if (restored) {
-            _ = c.tcsetattr(c.STDIN_FILENO, c.TCSANOW, &original_termios);
-            stdout_file.writeAll("\n") catch {};
+        defer {
+            if (restored) {
+                _ = c.tcsetattr(c.STDIN_FILENO, c.TCSANOW, &original_termios);
+                stdout_file.writeAll("\n") catch {};
+            }
         }
     }
 

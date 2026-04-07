@@ -13,7 +13,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+          - os: windows-latest
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -27,17 +30,12 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Install Linux deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev
-
       - name: Check formatting
+        shell: bash
         run: zig fmt --check src/*.zig build.zig
 
       - name: Run tests
-        run: zig test src/main.zig -lc -lsqlite3
+        run: zig build test
 
-      - name: Build release-safe binary
+      - name: Build
         run: zig build -Doptimize=ReleaseSafe

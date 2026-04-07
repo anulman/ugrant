@@ -34,8 +34,10 @@ zig build -Doptimize=ReleaseSafe
 Primary tests:
 
 ```bash
-zig test src/main.zig -lc -lsqlite3
+zig build test
 ```
+
+SQLite is vendored via `third_party/sqlite-amalgamation`, so builds and tests should not depend on a system `libsqlite3` package.
 
 If you touch release, installer, worker, or docs, also sanity-check the affected files directly.
 

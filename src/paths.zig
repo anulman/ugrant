@@ -40,8 +40,45 @@ pub const Paths = struct {
     }
 };
 
+fn getEnvVarOwned(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
+    return std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+}
+
+fn getHomeDir(allocator: std.mem.Allocator) ![]u8 {
+    if (try getEnvVarOwned(allocator, "HOME")) |home| return home;
+
+    if (builtin.os.tag == .windows) {
+        if (try getEnvVarOwned(allocator, "USERPROFILE")) |profile| return profile;
+
+        const drive = try getEnvVarOwned(allocator, "HOMEDRIVE");
+        defer if (drive) |value| allocator.free(value);
+
+        const path = try getEnvVarOwned(allocator, "HOMEPATH");
+        defer if (path) |value| allocator.free(value);
+
+        if (drive) |drive_value| {
+            if (path) |path_value| return std.mem.concat(allocator, u8, &.{ drive_value, path_value });
+        }
+    }
+
+    return error.MissingHome;
+}
+
+fn envVarExists(name: []const u8) bool {
+    const raw = std.process.getEnvVarOwned(std.heap.page_allocator, name) catch |err| return switch (err) {
+        error.EnvironmentVariableNotFound => false,
+        else => false,
+    };
+    defer std.heap.page_allocator.free(raw);
+    return true;
+}
+
 pub fn resolvePaths(allocator: std.mem.Allocator) !Paths {
-    const home = std.posix.getenv("HOME") orelse return error.MissingHome;
+    const home = try getHomeDir(allocator);
+    defer allocator.free(home);
     const config_path = try std.fs.path.join(allocator, &.{ home, config_rel_path });
     const state_dir = try std.fs.path.join(allocator, &.{ home, state_rel_dir });
     const db_path = try std.fs.path.join(allocator, &.{ state_dir, db_filename });
@@ -137,12 +174,21 @@ fn tightenFilePermissions(path: []const u8) !void {
 }
 
 pub fn envTruthy(name: []const u8) bool {
-    const raw = std.posix.getenv(name) orelse return false;
+    const raw = std.process.getEnvVarOwned(std.heap.page_allocator, name) catch |err| return switch (err) {
+        error.EnvironmentVariableNotFound => false,
+        else => false,
+    };
+    defer std.heap.page_allocator.free(raw);
     return std.mem.eql(u8, raw, "1") or std.ascii.eqlIgnoreCase(raw, "true") or std.ascii.eqlIgnoreCase(raw, "yes");
 }
 
 pub fn commandExists(allocator: std.mem.Allocator, name: []const u8) bool {
-    const result = std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "sh", "-c", "command -v \"$1\" >/dev/null 2>&1", "sh", name }, .max_output_bytes = 0 }) catch return false;
+    const result = if (builtin.os.tag == .windows)
+        std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "where.exe", name }, .max_output_bytes = 4096 }) catch return false
+    else
+        std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "sh", "-c", "command -v \"$1\" >/dev/null 2>&1", "sh", name }, .max_output_bytes = 4096 }) catch return false;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
     return switch (result.term) {
         .Exited => |code| code == 0,
         else => false,
@@ -156,7 +202,7 @@ pub fn backendAvailable(allocator: std.mem.Allocator, backend: []const u8) bool 
     }
     if (std.mem.eql(u8, backend, "platform-secure-store")) {
         if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return true;
-        return commandExists(allocator, "secret-tool") and std.posix.getenv("DBUS_SESSION_BUS_ADDRESS") != null;
+        return commandExists(allocator, "secret-tool") and envVarExists("DBUS_SESSION_BUS_ADDRESS");
     }
     if (std.mem.eql(u8, backend, "passphrase")) return true;
     if (std.mem.eql(u8, backend, "insecure-keyfile")) return true;
