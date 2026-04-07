@@ -1,0 +1,13 @@
+name = "ugrant-site"
+main = "worker.js"
+compatibility_date = "2026-04-07"
+workers_dev = false
+
+routes = [
+  { pattern = "www.ugrant.sh/*", zone_name = "ugrant.sh" },
+  { pattern = "ugrant.sh/*", zone_name = "ugrant.sh" }
+]
+
+[assets]
+directory = "./site"
+binding = "ASSETS"
