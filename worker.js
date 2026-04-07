@@ -3,7 +3,7 @@ const GITHUB_API_LATEST = "https://api.github.com/repos/anulman/ugrant/releases/
 const WWW_HOST = "www.ugrant.sh";
 const SUPPORTED_TARGETS = new Set(["linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64"]);
 const MINISIGN_PUBLIC_KEY_COMMENT = "minisign public key for ugrant releases";
-const MINISIGN_PUBLIC_KEY = "REPLACE_WITH_MINISIGN_PUBLIC_KEY";
+const MINISIGN_PUBLIC_KEY = "RWROMGoscMzrnBn4DAQctEu3E+Y5totRluTj+M/IT0w6ZIuaNjkepTAB";
 const MINISIGN_PUBLIC_KEY_FILE = `untrusted comment: ${MINISIGN_PUBLIC_KEY_COMMENT}\n${MINISIGN_PUBLIC_KEY}\n`;
 const INSTALL_KIND_SUFFIX = {
   archive: "",
@@ -125,7 +125,7 @@ const INSTALL_SCRIPT = String.raw`#!/bin/sh
 set -eu
 
 BASE_URL="https://www.ugrant.sh"
-MINISIGN_PUBLIC_KEY="REPLACE_WITH_MINISIGN_PUBLIC_KEY"
+MINISIGN_PUBLIC_KEY="RWROMGoscMzrnBn4DAQctEu3E+Y5totRluTj+M/IT0w6ZIuaNjkepTAB"
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 verification_summary=""
@@ -203,7 +203,7 @@ verify_checksum() {
 }
 
 verify_archive() {
-  if command -v minisign >/dev/null 2>&1 && [ "$MINISIGN_PUBLIC_KEY" != "REPLACE_WITH_MINISIGN_PUBLIC_KEY" ]; then
+  if command -v minisign >/dev/null 2>&1 && [ "$MINISIGN_PUBLIC_KEY" != "RWROMGoscMzrnBn4DAQctEu3E+Y5totRluTj+M/IT0w6ZIuaNjkepTAB" ]; then
     download_signature
     minisign -Vm "$archive" -P "$MINISIGN_PUBLIC_KEY" -x "$signature"
     verification_summary="Verified release signature with minisign"
