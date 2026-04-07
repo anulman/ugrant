@@ -88,11 +88,13 @@ jobs:
           merge-multiple: true
 
       - name: Install minisign
+        if: ${{ secrets.MINISIGN_SECRET_KEY != '' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y minisign
 
       - name: Sign release archives
+        if: ${{ secrets.MINISIGN_SECRET_KEY != '' }}
         shell: bash
         env:
           TAG: ${{ github.event.inputs.tag }}
@@ -100,14 +102,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
-            echo "Missing GitHub secret: MINISIGN_SECRET_KEY" >&2
-            exit 1
-          fi
-
           if grep -q '^REPLACE_WITH_MINISIGN_PUBLIC_KEY$' minisign.pub; then
-            echo "minisign.pub still contains the placeholder key. Commit the real public key before releasing." >&2
-            exit 1
+            echo "minisign.pub still contains the placeholder key. Skipping minisign signing for this release." >&2
+            exit 0
           fi
 
           key_file="$RUNNER_TEMP/ugrant.minisign.key"

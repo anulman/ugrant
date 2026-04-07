@@ -2780,9 +2780,14 @@ test "rekey can switch from insecure-keyfile to resolved platform-secure-store b
 
     const updated_record = try loadWrappedDek(allocator, vault.keys_path);
     defer freeWrappedDekRecord(allocator, updated_record);
-    try std.testing.expectEqualStrings("tpm2", updated_record.backend);
-    try std.testing.expectEqualStrings("dHBtMi1wdWI=", updated_record.tpm2_pub_b64.?);
-    try std.testing.expectEqualStrings("dHBtMi1wcml2", updated_record.tpm2_priv_b64.?);
+    try std.testing.expectEqualStrings(target_backend, updated_record.backend);
+    if (std.mem.eql(u8, target_backend, "tpm2")) {
+        try std.testing.expectEqualStrings("dHBtMi1wdWI=", updated_record.tpm2_pub_b64.?);
+        try std.testing.expectEqualStrings("dHBtMi1wcml2", updated_record.tpm2_priv_b64.?);
+    } else {
+        try std.testing.expect(updated_record.tpm2_pub_b64 == null);
+        try std.testing.expect(updated_record.tpm2_priv_b64 == null);
+    }
 
     const new_dek = try unwrapDekWithSecret(allocator, updated_record, "tpm2-test-secret");
     defer allocator.free(new_dek);
