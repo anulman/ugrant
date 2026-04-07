@@ -1641,11 +1641,24 @@ fn promptLine(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
     return allocator.dupe(u8, std.mem.trimRight(u8, buf[0..n], "\r\n"));
 }
 
+const WindowsHiddenConsoleInput = struct {
+    handle: c.HANDLE,
+    original_mode: c.DWORD,
+};
+
 fn promptSecret(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
     var stdout_file = std.fs.File.stdout();
     try stdout_file.writeAll(prompt);
 
-    if (builtin.os.tag != .windows) {
+    if (builtin.os.tag == .windows) {
+        const hidden_console = enableWindowsHiddenConsoleInput();
+        defer {
+            if (hidden_console) |state| {
+                _ = c.SetConsoleMode(state.handle, state.original_mode);
+                stdout_file.writeAll("\n") catch {};
+            }
+        }
+    } else {
         var restored = false;
         var original_termios: c.termios = undefined;
         if (c.isatty(c.STDIN_FILENO) == 1) {
@@ -1668,6 +1681,22 @@ fn promptSecret(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
     var buf: [4096]u8 = undefined;
     const n = try stdin_file.read(&buf);
     return allocator.dupe(u8, std.mem.trimRight(u8, buf[0..n], "\r\n"));
+}
+
+fn enableWindowsHiddenConsoleInput() ?WindowsHiddenConsoleInput {
+    if (builtin.os.tag != .windows) return null;
+
+    const stdin_handle = c.GetStdHandle(c.STD_INPUT_HANDLE);
+    var original_mode: c.DWORD = 0;
+    if (c.GetConsoleMode(stdin_handle, &original_mode) == 0) return null;
+
+    const hidden_mode = original_mode & ~@as(c.DWORD, c.ENABLE_ECHO_INPUT);
+    if (c.SetConsoleMode(stdin_handle, hidden_mode) == 0) return null;
+
+    return .{
+        .handle = stdin_handle,
+        .original_mode = original_mode,
+    };
 }
 
 fn generateCodeVerifier(allocator: std.mem.Allocator) ![]u8 {
