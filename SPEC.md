@@ -104,6 +104,7 @@ Given I select `platform-secure-store`
 When `ugrant` resolves the requested backend
 Then on Linux it prefers TPM2 when TPM2 is available
 And otherwise on Linux it falls back to Secret Service via `secret-tool`
+And on macOS it uses the user's Keychain via a generic-password item in the default login keychain
 And on other operating systems it uses that platform's secure store implementation
 And the persisted backend may be the concrete backend that was actually used
 
@@ -310,6 +311,7 @@ When I run `ugrant doctor`
 Then it verifies config paths
 And it verifies secret-state permissions
 And it verifies the active DEK can be unwrapped
+And platform secure store backends fail clearly when the referenced local secret is missing or inaccessible
 And it verifies schema and indexes
 And it never prints secret values
 
@@ -324,6 +326,7 @@ Given `ugrant` is initialized but no profile has logged in yet
 When I run `ugrant status`
 Then it shows initialization state
 And it shows the selected DEK wrapping backend
+And it may name the concrete local provider, such as macOS Keychain or Secret Service
 And it shows whether security mode is normal or degraded
 And it shows that no grants currently exist
 And it does not print the DEK or token material
