@@ -38,6 +38,8 @@ const argon2_params = crypto.pwhash.argon2.Params.owasp_2id;
 const argon2_kdf_name = "argon2id-v19";
 const hkdf_sha256_kdf_name = "hkdf-sha256";
 const dpapi_entropy = "ugrant-dpapi-wrap-v1";
+const secure_enclave_local_wrap_aad = "ugrant-secure-enclave-wrap-material";
+const secure_enclave_local_wrap_blob_version = 1;
 const macos_keychain_service = "dev.ugrant.platform-secure-store";
 const macos_keychain_account_prefix = "dek:";
 const macos_keychain_secret_ref_prefix = "macos-keychain:service=";
@@ -1073,6 +1075,13 @@ fn getEnvOrDefaultOwned(allocator: std.mem.Allocator, name: []const u8, fallback
     };
 }
 
+fn getEnvVarOwnedOrNull(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
+    return std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => err,
+    };
+}
+
 fn backendAvailable(allocator: std.mem.Allocator, backend: []const u8) bool {
     return pathing.backendAvailable(allocator, backend);
 }
@@ -1342,8 +1351,12 @@ fn unprotectDpapiBytes(allocator: std.mem.Allocator, protected: []const u8) ![]u
 }
 
 const macos_secure_enclave_helper_script =
+    "import CryptoKit\n" ++
     "import Foundation\n" ++
     "import Security\n" ++
+    "let wrapMaterialService = \"dev.ugrant.secure-enclave.wrap-material\"\n" ++
+    "let wrapMaterialVersion = 1\n" ++
+    "let wrapMaterialInfo = Data(\"ugrant-secure-enclave-wrap-material\".utf8)\n" ++
     "func fail(_ message: String) -> Never {\n" ++
     "    FileHandle.standardError.write(Data((message + \"\\n\").utf8))\n" ++
     "    exit(1)\n" ++
@@ -1355,6 +1368,12 @@ const macos_secure_enclave_helper_script =
     "func appTag(_ keyVersion: Int) -> String {\n" ++
     "    \"dev.ugrant.secure-enclave.dek:\\(keyVersion)\"\n" ++
     "}\n" ++
+    "func randomData(_ count: Int) -> Data {\n" ++
+    "    var bytes = [UInt8](repeating: 0, count: count)\n" ++
+    "    let status = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)\n" ++
+    "    guard status == errSecSuccess else { fail(\"SecRandomCopyBytes failed: \\(status)\") }\n" ++
+    "    return Data(bytes)\n" ++
+    "}\n" ++
     "func deleteKey(tag: String) {\n" ++
     "    let query: [String: Any] = [\n" ++
     "        kSecClass as String: kSecClassKey,\n" ++
@@ -1364,6 +1383,17 @@ const macos_secure_enclave_helper_script =
     "    let status = SecItemDelete(query as CFDictionary)\n" ++
     "    if status != errSecSuccess && status != errSecItemNotFound {\n" ++
     "        fail(\"SecItemDelete failed: \\(status)\")\n" ++
+    "    }\n" ++
+    "}\n" ++
+    "func deleteWrapMaterial(tag: String) {\n" ++
+    "    let query: [String: Any] = [\n" ++
+    "        kSecClass as String: kSecClassGenericPassword,\n" ++
+    "        kSecAttrService as String: wrapMaterialService,\n" ++
+    "        kSecAttrAccount as String: tag,\n" ++
+    "    ]\n" ++
+    "    let status = SecItemDelete(query as CFDictionary)\n" ++
+    "    if status != errSecSuccess && status != errSecItemNotFound {\n" ++
+    "        fail(\"SecItemDelete wrap material failed: \\(status)\")\n" ++
     "    }\n" ++
     "}\n" ++
     "func createEphemeralPrivateKey() -> SecKey {\n" ++
@@ -1426,6 +1456,41 @@ const macos_secure_enclave_helper_script =
     "    }\n" ++
     "    return data\n" ++
     "}\n" ++
+    "func loadWrapMaterial(tag: String) -> Data? {\n" ++
+    "    let query: [String: Any] = [\n" ++
+    "        kSecClass as String: kSecClassGenericPassword,\n" ++
+    "        kSecAttrService as String: wrapMaterialService,\n" ++
+    "        kSecAttrAccount as String: tag,\n" ++
+    "        kSecReturnData as String: true,\n" ++
+    "    ]\n" ++
+    "    var item: CFTypeRef?\n" ++
+    "    let status = SecItemCopyMatching(query as CFDictionary, &item)\n" ++
+    "    if status == errSecItemNotFound { return nil }\n" ++
+    "    guard status == errSecSuccess, let data = item as? Data else {\n" ++
+    "        fail(\"SecItemCopyMatching wrap material failed: \\(status)\")\n" ++
+    "    }\n" ++
+    "    return data\n" ++
+    "}\n" ++
+    "func storeWrapMaterial(tag: String, payload: [String: Any]) {\n" ++
+    "    let data: Data\n" ++
+    "    do {\n" ++
+    "        data = try JSONSerialization.data(withJSONObject: payload, options: [])\n" ++
+    "    } catch {\n" ++
+    "        fail(\"wrap material serialization failed: \\(error)\")\n" ++
+    "    }\n" ++
+    "    deleteWrapMaterial(tag: tag)\n" ++
+    "    let query: [String: Any] = [\n" ++
+    "        kSecClass as String: kSecClassGenericPassword,\n" ++
+    "        kSecAttrService as String: wrapMaterialService,\n" ++
+    "        kSecAttrAccount as String: tag,\n" ++
+    "        kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,\n" ++
+    "        kSecValueData as String: data,\n" ++
+    "    ]\n" ++
+    "    let status = SecItemAdd(query as CFDictionary, nil)\n" ++
+    "    guard status == errSecSuccess else {\n" ++
+    "        fail(\"SecItemAdd wrap material failed: \\(status)\")\n" ++
+    "    }\n" ++
+    "}\n" ++
     "func publicKeyFromData(_ data: Data) -> SecKey {\n" ++
     "    var error: Unmanaged<CFError>?\n" ++
     "    let attrs: [String: Any] = [\n" ++
@@ -1450,6 +1515,58 @@ const macos_secure_enclave_helper_script =
     "    }\n" ++
     "    return data\n" ++
     "}\n" ++
+    "func wrapKey(privateKey: SecKey, publicKey: SecKey) -> SymmetricKey {\n" ++
+    "    let algorithm = SecKeyAlgorithm.ecdhKeyExchangeStandardX963SHA256\n" ++
+    "    guard SecKeyIsAlgorithmSupported(privateKey, .keyExchange, algorithm) else {\n" ++
+    "        fail(\"ECDH X9.63 SHA-256 key exchange is not supported for this key\")\n" ++
+    "    }\n" ++
+    "    var error: Unmanaged<CFError>?\n" ++
+    "    let params: [String: Any] = [\n" ++
+    "        kSecKeyKeyExchangeParameterRequestedSize as String: 32,\n" ++
+    "        kSecKeyKeyExchangeParameterSharedInfo as String: wrapMaterialInfo,\n" ++
+    "        kSecUseAuthenticationUI as String: kSecUseAuthenticationUIAllow,\n" ++
+    "    ]\n" ++
+    "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params as CFDictionary, &error) as Data? else {\n" ++
+    "        fail(\"wrap key derivation failed: \\(secError(error))\")\n" ++
+    "    }\n" ++
+    "    return SymmetricKey(data: data)\n" ++
+    "}\n" ++
+    "func sealWrapMaterial(secret: Data, key: SymmetricKey) -> [String: Any] {\n" ++
+    "    do {\n" ++
+    "        let sealed = try AES.GCM.seal(secret, using: key)\n" ++
+    "        let nonce = sealed.nonce.withUnsafeBytes { Data($0) }\n" ++
+    "        let ciphertext = sealed.ciphertext + sealed.tag\n" ++
+    "        return [\n" ++
+    "            \"version\": wrapMaterialVersion,\n" ++
+    "            \"nonce_b64\": nonce.base64EncodedString(),\n" ++
+    "            \"ciphertext_b64\": ciphertext.base64EncodedString(),\n" ++
+    "        ]\n" ++
+    "    } catch {\n" ++
+    "        fail(\"AES-GCM seal failed: \\(error)\")\n" ++
+    "    }\n" ++
+    "}\n" ++
+    "func openWrapMaterial(payload: [String: Any], key: SymmetricKey) -> Data {\n" ++
+    "    guard let version = payload[\"version\"] as? Int, version == wrapMaterialVersion else {\n" ++
+    "        fail(\"unsupported wrap material version\")\n" ++
+    "    }\n" ++
+    "    guard let nonceB64 = payload[\"nonce_b64\"] as? String,\n" ++
+    "          let ciphertextB64 = payload[\"ciphertext_b64\"] as? String,\n" ++
+    "          let nonceData = Data(base64Encoded: nonceB64),\n" ++
+    "          let combined = Data(base64Encoded: ciphertextB64),\n" ++
+    "          combined.count >= 16 else {\n" ++
+    "        fail(\"wrap material payload is invalid\")\n" ++
+    "    }\n" ++
+    "    do {\n" ++
+    "        let box = try AES.GCM.SealedBox(\n" ++
+    "            nonce: AES.GCM.Nonce(data: nonceData),\n" ++
+    "            ciphertext: Data(combined.dropLast(16)),\n" ++
+    "            tag: Data(combined.suffix(16))\n" ++
+    "        )\n" ++
+    "        return try AES.GCM.open(box, using: key)\n" ++
+    "    } catch {\n" ++
+    "        fail(\"AES-GCM open failed: \\(error)\")\n" ++
+    "    }\n" ++
+    "}\n" ++
     "func emit(_ payload: [String: Any]) {\n" ++
     "    do {\n" ++
     "        let data = try JSONSerialization.data(withJSONObject: payload, options: [])\n" ++
@@ -1468,24 +1585,47 @@ const macos_secure_enclave_helper_script =
     "    let tag = appTag(keyVersion)\n" ++
     "    let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence)\n" ++
     "    let ephemeralPrivate = createEphemeralPrivateKey()\n" ++
-    "    let secret = sharedSecret(privateKey: ephemeralPrivate, publicKey: SecKeyCopyPublicKey(enclaveKey)!)\n" ++
+    "    let ephemeralPubB64 = publicKeyData(ephemeralPrivate).base64EncodedString()\n" ++
+    "    let wrapSecret = randomData(32)\n" ++
+    "    let key = wrapKey(privateKey: ephemeralPrivate, publicKey: SecKeyCopyPublicKey(enclaveKey)!)\n" ++
+    "    var payload = sealWrapMaterial(secret: wrapSecret, key: key)\n" ++
+    "    payload[\"ephemeral_pub_b64\"] = ephemeralPubB64\n" ++
+    "    storeWrapMaterial(tag: tag, payload: payload)\n" ++
     "    emit([\n" ++
-    "        \"secret_b64\": secret.base64EncodedString(),\n" ++
+    "        \"secret_b64\": wrapSecret.base64EncodedString(),\n" ++
     "        \"secret_ref\": \"macos-secure-enclave:tag=\\(tag)\",\n" ++
-    "        \"ephemeral_pub_b64\": publicKeyData(ephemeralPrivate).base64EncodedString(),\n" ++
+    "        \"ephemeral_pub_b64\": ephemeralPubB64,\n" ++
     "        \"require_user_presence\": requireUserPresence,\n" ++
     "    ])\n" ++
     "case \"load\":\n" ++
     "    if args.count != 4 { fail(\"usage: load <tag> <ephemeral-pub-b64>\") }\n" ++
     "    guard let ephemeralPub = Data(base64Encoded: args[3]) else { fail(\"invalid ephemeral public key base64\") }\n" ++
     "    let enclaveKey = loadSecureEnclavePrivateKey(tag: args[2])\n" ++
-    "    let secret = sharedSecret(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))\n" ++
+    "    let secret: Data\n" ++
+    "    if let stored = loadWrapMaterial(tag: args[2]) {\n" ++
+    "        let raw: Any\n" ++
+    "        do {\n" ++
+    "            raw = try JSONSerialization.jsonObject(with: stored, options: [])\n" ++
+    "        } catch {\n" ++
+    "            fail(\"wrap material JSON is invalid: \\(error)\")\n" ++
+    "        }\n" ++
+    "        guard let payload = raw as? [String: Any] else {\n" ++
+    "            fail(\"wrap material JSON is invalid\")\n" ++
+    "        }\n" ++
+    "        if let storedEphemeral = payload[\"ephemeral_pub_b64\"] as? String, storedEphemeral != args[3] {\n" ++
+    "            fail(\"stored wrap material does not match wrapped-key metadata\")\n" ++
+    "        }\n" ++
+    "        secret = openWrapMaterial(payload: payload, key: wrapKey(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub)))\n" ++
+    "    } else {\n" ++
+    "        secret = sharedSecret(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))\n" ++
+    "    }\n" ++
     "    emit([\n" ++
     "        \"secret_b64\": secret.base64EncodedString(),\n" ++
     "        \"secret_ref\": \"macos-secure-enclave:tag=\\(args[2])\",\n" ++
     "    ])\n" ++
     "case \"delete\":\n" ++
     "    if args.count != 3 { fail(\"usage: delete <tag>\") }\n" ++
+    "    deleteWrapMaterial(tag: args[2])\n" ++
     "    deleteKey(tag: args[2])\n" ++
     "default:\n" ++
     "    fail(\"unknown mode: \\(args[1])\")\n" ++
@@ -1543,6 +1683,159 @@ fn secureEnclaveOptionsFromRecord(record: WrappedDekRecord) WrapBackendOptions {
     };
 }
 
+const SecureEnclaveLocalWrapBlob = struct {
+    version: u32,
+    ephemeral_pub_b64: []const u8,
+    nonce_b64: []const u8,
+    ciphertext_b64: []const u8,
+};
+
+fn freeSecureEnclaveLocalWrapBlob(allocator: std.mem.Allocator, blob: SecureEnclaveLocalWrapBlob) void {
+    allocator.free(blob.ephemeral_pub_b64);
+    allocator.free(blob.nonce_b64);
+    allocator.free(blob.ciphertext_b64);
+}
+
+fn secureEnclaveTestStoreDir(allocator: std.mem.Allocator) ![]const u8 {
+    return getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_STORE_DIR", "/tmp/ugrant-secure-enclave-store");
+}
+
+fn secureEnclaveTestBlobPathForTag(allocator: std.mem.Allocator, tag: []const u8) ![]const u8 {
+    const dir = try secureEnclaveTestStoreDir(allocator);
+    defer allocator.free(dir);
+
+    var digest: [32]u8 = undefined;
+    crypto.hash.sha2.Sha256.hash(tag, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    return std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ dir, hex });
+}
+
+fn ensureSecureEnclaveTestStoreDir(allocator: std.mem.Allocator) !void {
+    const dir = try secureEnclaveTestStoreDir(allocator);
+    defer allocator.free(dir);
+    if (!std.fs.path.isAbsolute(dir)) return error.InvalidArgs;
+    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+}
+
+fn deriveSyntheticSecureEnclaveWrapKey(allocator: std.mem.Allocator, out: *[dek_len]u8, tag: []const u8, ephemeral_pub_b64: []const u8) !void {
+    const root = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_KEY_MATERIAL", "ugrant-test-secure-enclave-root");
+    defer allocator.free(root);
+
+    var h = crypto.hash.sha2.Sha256.init(.{});
+    h.update(root);
+    h.update("\n");
+    h.update(tag);
+    h.update("\n");
+    h.update(ephemeral_pub_b64);
+    h.final(out);
+}
+
+fn saveSecureEnclaveTestBlob(allocator: std.mem.Allocator, tag: []const u8, blob: SecureEnclaveLocalWrapBlob) !void {
+    try ensureSecureEnclaveTestStoreDir(allocator);
+
+    var list = std.ArrayList(u8){};
+    defer list.deinit(std.heap.page_allocator);
+    try list.writer(std.heap.page_allocator).print(
+        "{{\"version\":{},\"ephemeral_pub_b64\":\"{s}\",\"nonce_b64\":\"{s}\",\"ciphertext_b64\":\"{s}\"}}",
+        .{ blob.version, blob.ephemeral_pub_b64, blob.nonce_b64, blob.ciphertext_b64 },
+    );
+    const rendered = try list.toOwnedSlice(std.heap.page_allocator);
+    defer std.heap.page_allocator.free(rendered);
+
+    const path = try secureEnclaveTestBlobPathForTag(allocator, tag);
+    defer allocator.free(path);
+    var file = try std.fs.createFileAbsolute(path, .{ .truncate = true, .mode = pathing.secret_file_mode });
+    defer file.close();
+    try file.writeAll(rendered);
+}
+
+fn loadSecureEnclaveTestBlob(allocator: std.mem.Allocator, tag: []const u8) !SecureEnclaveLocalWrapBlob {
+    const path = try secureEnclaveTestBlobPathForTag(allocator, tag);
+    defer allocator.free(path);
+
+    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return error.WrapBackendUnavailable,
+        else => return err,
+    };
+    defer allocator.free(bytes);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    return .{
+        .version = @as(u32, @intCast(obj.get("version").?.integer)),
+        .ephemeral_pub_b64 = try allocator.dupe(u8, obj.get("ephemeral_pub_b64").?.string),
+        .nonce_b64 = try allocator.dupe(u8, obj.get("nonce_b64").?.string),
+        .ciphertext_b64 = try allocator.dupe(u8, obj.get("ciphertext_b64").?.string),
+    };
+}
+
+fn deleteSecureEnclaveTestBlob(allocator: std.mem.Allocator, tag: []const u8) !void {
+    const path = try secureEnclaveTestBlobPathForTag(allocator, tag);
+    defer allocator.free(path);
+    std.fs.deleteFileAbsolute(path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+}
+
+fn saveSyntheticSecureEnclaveWrapSecret(allocator: std.mem.Allocator, tag: []const u8, ephemeral_pub_b64: []const u8, secret: []const u8) !void {
+    var key: [dek_len]u8 = undefined;
+    try deriveSyntheticSecureEnclaveWrapKey(allocator, &key, tag, ephemeral_pub_b64);
+
+    var nonce: [gcm_nonce_len]u8 = undefined;
+    crypto.random.bytes(&nonce);
+
+    const ciphertext = try allocator.alloc(u8, secret.len);
+    defer allocator.free(ciphertext);
+
+    var auth_tag: [gcm_tag_len]u8 = undefined;
+    crypto.aead.aes_gcm.Aes256Gcm.encrypt(ciphertext, &auth_tag, secret, secure_enclave_local_wrap_aad, nonce, key);
+
+    const combined = try allocator.alloc(u8, ciphertext.len + auth_tag.len);
+    defer allocator.free(combined);
+    @memcpy(combined[0..ciphertext.len], ciphertext);
+    @memcpy(combined[ciphertext.len..], &auth_tag);
+
+    const blob = SecureEnclaveLocalWrapBlob{
+        .version = secure_enclave_local_wrap_blob_version,
+        .ephemeral_pub_b64 = try allocator.dupe(u8, ephemeral_pub_b64),
+        .nonce_b64 = try b64EncodeAlloc(allocator, &nonce),
+        .ciphertext_b64 = try b64EncodeAlloc(allocator, combined),
+    };
+    defer freeSecureEnclaveLocalWrapBlob(allocator, blob);
+    try saveSecureEnclaveTestBlob(allocator, tag, blob);
+}
+
+fn loadSyntheticSecureEnclaveWrapSecret(allocator: std.mem.Allocator, tag: []const u8, ephemeral_pub_b64: []const u8) ![]u8 {
+    const blob = try loadSecureEnclaveTestBlob(allocator, tag);
+    defer freeSecureEnclaveLocalWrapBlob(allocator, blob);
+
+    if (blob.version != secure_enclave_local_wrap_blob_version) return error.InvalidWrappedDek;
+    if (!std.mem.eql(u8, blob.ephemeral_pub_b64, ephemeral_pub_b64)) return error.InvalidWrappedDek;
+
+    const nonce = try b64DecodeAlloc(allocator, blob.nonce_b64);
+    defer allocator.free(nonce);
+    if (nonce.len != gcm_nonce_len) return error.InvalidWrappedDek;
+
+    const combined = try b64DecodeAlloc(allocator, blob.ciphertext_b64);
+    defer allocator.free(combined);
+    if (combined.len < gcm_tag_len) return error.InvalidWrappedDek;
+
+    var key: [dek_len]u8 = undefined;
+    try deriveSyntheticSecureEnclaveWrapKey(allocator, &key, tag, ephemeral_pub_b64);
+
+    const ciphertext = combined[0 .. combined.len - gcm_tag_len];
+    const auth_tag: [gcm_tag_len]u8 = combined[combined.len - gcm_tag_len ..][0..gcm_tag_len].*;
+    const secret = try allocator.alloc(u8, ciphertext.len);
+    errdefer allocator.free(secret);
+    crypto.aead.aes_gcm.Aes256Gcm.decrypt(secret, ciphertext, auth_tag, secure_enclave_local_wrap_aad, nonce[0..gcm_nonce_len].*, key) catch return error.InvalidWrappedDek;
+    return secret;
+}
+
 fn parseSecureEnclaveWrapSecretFromJson(allocator: std.mem.Allocator, stdout: []const u8) !WrapSecret {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, stdout, .{});
     defer parsed.deinit();
@@ -1576,10 +1869,32 @@ fn runMacOsSecureEnclaveHelper(allocator: std.mem.Allocator, argv: []const []con
 
 fn createMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, key_version: u32, require_user_presence: bool) !WrapSecret {
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) {
+        const tag = try formatMacOsSecureEnclaveApplicationTag(allocator, key_version);
+        defer allocator.free(tag);
+
+        const secret_ref = try formatMacOsSecureEnclaveSecretRefForTag(allocator, tag);
+        errdefer allocator.free(secret_ref);
+
+        const secret = if (try getEnvVarOwnedOrNull(allocator, "UGRANT_TEST_SECURE_ENCLAVE_SECRET")) |v|
+            v
+        else
+            try randomUrlSafe(allocator, 32);
+        errdefer freeSecret(allocator, secret);
+
+        const ephemeral_pub_b64 = if (try getEnvVarOwnedOrNull(allocator, "UGRANT_TEST_SECURE_ENCLAVE_EPHEMERAL_PUB_B64")) |v|
+            v
+        else blk: {
+            var ephemeral_pub: [33]u8 = undefined;
+            crypto.random.bytes(&ephemeral_pub);
+            break :blk try b64EncodeAlloc(allocator, &ephemeral_pub);
+        };
+        errdefer allocator.free(ephemeral_pub_b64);
+
+        try saveSyntheticSecureEnclaveWrapSecret(allocator, tag, ephemeral_pub_b64, secret);
         return .{
-            .secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_SECRET", "secure-enclave-test-secret"),
-            .secret_ref = try formatMacOsSecureEnclaveSecretRef(allocator, key_version),
-            .secure_enclave_ephemeral_pub_b64 = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_EPHEMERAL_PUB_B64", "c2VjdXJlLWVuY2xhdmUtdGVzdC1lcGhlbWVyYWwtcHVi"),
+            .secret = secret,
+            .secret_ref = secret_ref,
+            .secure_enclave_ephemeral_pub_b64 = ephemeral_pub_b64,
             .require_user_presence = require_user_presence,
         };
     }
@@ -1595,8 +1910,12 @@ fn loadMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []cons
     if (parsed.key_version != expected_key_version) return error.InvalidWrappedDek;
 
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) {
+        const secret = loadSyntheticSecureEnclaveWrapSecret(allocator, parsed.tag, ephemeral_pub_b64) catch |err| switch (err) {
+            error.WrapBackendUnavailable => try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_SECRET", "secure-enclave-test-secret"),
+            else => return err,
+        };
         return .{
-            .secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_SECRET", "secure-enclave-test-secret"),
+            .secret = secret,
             .secret_ref = try allocator.dupe(u8, secret_ref),
             .secure_enclave_ephemeral_pub_b64 = try allocator.dupe(u8, ephemeral_pub_b64),
             .require_user_presence = require_user_presence,
@@ -1615,7 +1934,7 @@ fn loadMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []cons
 
 fn deleteMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []const u8) !void {
     const parsed = try parseMacOsSecureEnclaveSecretRef(secret_ref);
-    if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return;
+    if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return deleteSecureEnclaveTestBlob(allocator, parsed.tag);
     if (builtin.os.tag != .macos) return error.WrapBackendUnavailable;
 
     const result = runChildWithInput(allocator, &.{ macos_xcrun_tool, "swift", "-", "delete", parsed.tag }, macos_secure_enclave_helper_script, 4096) catch return error.WrapBackendUnavailable;
@@ -3239,9 +3558,21 @@ test "secure enclave platform store wraps and unwraps via synthetic provider" {
     const allocator = std.testing.allocator;
     const created = try platformStoreWrapSecret(allocator, null, 5, null, .{ .secure_enclave = true, .require_user_presence = true });
     defer freeWrapSecret(allocator, created);
+    defer deleteMacOsSecureEnclaveSecret(allocator, created.secret_ref.?) catch {};
     try std.testing.expect(isMacOsSecureEnclaveSecretRef(created.secret_ref.?));
     try std.testing.expect(created.require_user_presence);
     try std.testing.expect(created.secure_enclave_ephemeral_pub_b64 != null);
+
+    const parsed = try parseMacOsSecureEnclaveSecretRef(created.secret_ref.?);
+    const blob_path = try secureEnclaveTestBlobPathForTag(allocator, parsed.tag);
+    defer allocator.free(blob_path);
+    try std.testing.expect(try fileExists(blob_path));
+
+    const blob = try loadSecureEnclaveTestBlob(allocator, parsed.tag);
+    defer freeSecureEnclaveLocalWrapBlob(allocator, blob);
+    try std.testing.expectEqual(@as(u32, secure_enclave_local_wrap_blob_version), blob.version);
+    try std.testing.expectEqualStrings(created.secure_enclave_ephemeral_pub_b64.?, blob.ephemeral_pub_b64);
+    try std.testing.expect(blob.ciphertext_b64.len > 0);
 
     var dek: [dek_len]u8 = [_]u8{0x5a} ** dek_len;
     const record = try wrapDekForBackend(allocator, "platform-secure-store", 5, created.secret, &dek, created);
@@ -3253,6 +3584,37 @@ test "secure enclave platform store wraps and unwraps via synthetic provider" {
     const loaded = try platformStoreWrapSecret(allocator, null, record.key_version, record, .{});
     defer freeWrapSecret(allocator, loaded);
     try std.testing.expectEqualStrings(created.secret, loaded.secret);
+
+    const unwrapped = try unwrapDekWithSecret(allocator, record, loaded.secret);
+    defer freeSecret(allocator, unwrapped);
+    try std.testing.expectEqualSlices(u8, &dek, unwrapped);
+}
+
+test "secure enclave synthetic provider still unwraps legacy records without local wrap blob" {
+    if (!envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return;
+
+    const allocator = std.testing.allocator;
+    const secret_ref = try formatMacOsSecureEnclaveSecretRef(allocator, 51);
+    defer allocator.free(secret_ref);
+    try deleteMacOsSecureEnclaveSecret(allocator, secret_ref);
+
+    const legacy_secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_SECRET", "secure-enclave-test-secret");
+    defer freeSecret(allocator, legacy_secret);
+    const ephemeral_pub_b64 = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_EPHEMERAL_PUB_B64", "c2VjdXJlLWVuY2xhdmUtdGVzdC1lcGhlbWVyYWwtcHVi");
+    defer allocator.free(ephemeral_pub_b64);
+
+    var dek: [dek_len]u8 = [_]u8{0x6b} ** dek_len;
+    const record = try wrapDekForBackend(allocator, "platform-secure-store", 51, legacy_secret, &dek, .{
+        .secret = legacy_secret,
+        .secret_ref = secret_ref,
+        .secure_enclave_ephemeral_pub_b64 = ephemeral_pub_b64,
+    });
+    defer freeWrappedDekRecord(allocator, record);
+
+    const loaded = try platformStoreWrapSecret(allocator, null, record.key_version, record, .{});
+    defer freeWrapSecret(allocator, loaded);
+    try std.testing.expectEqualStrings(legacy_secret, loaded.secret);
+    try std.testing.expectEqualStrings(secret_ref, loaded.secret_ref.?);
 
     const unwrapped = try unwrapDekWithSecret(allocator, record, loaded.secret);
     defer freeSecret(allocator, unwrapped);
