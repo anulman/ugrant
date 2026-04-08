@@ -181,16 +181,12 @@ fn tightenIfExists(path: []const u8, comptime tightenFn: fn ([]const u8) anyerro
 
 fn tightenDirPermissions(path: []const u8) !void {
     if (builtin.os.tag == .windows) return;
-    var dir = try std.fs.openDirAbsolute(path, .{});
-    defer dir.close();
-    try dir.chmod(secret_dir_mode);
+    try std.posix.fchmodat(std.fs.cwd().fd, path, secret_dir_mode, 0);
 }
 
 fn tightenFilePermissions(path: []const u8) !void {
     if (builtin.os.tag == .windows) return;
-    var file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    try file.chmod(secret_file_mode);
+    try std.posix.fchmodat(std.fs.cwd().fd, path, secret_file_mode, 0);
 }
 
 pub fn envTruthy(name: []const u8) bool {

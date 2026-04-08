@@ -39,3 +39,13 @@ jobs:
 
       - name: Build
         run: zig build -Doptimize=ReleaseSafe
+
+      - name: Live lifecycle smoke test (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash scripts/qa-live-smoke.sh
+
+      - name: Live lifecycle smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/qa-live-smoke.ps1
