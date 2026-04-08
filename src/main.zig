@@ -3,9 +3,13 @@ const builtin = @import("builtin");
 const crypto = std.crypto;
 const argx = @import("args.zig");
 const cli = @import("cli.zig");
+const command_params = @import("command_params.zig");
 const env_output = @import("env_output.zig");
+const env_runtime = @import("env_runtime.zig");
 const pathing = @import("paths.zig");
+const reporting = @import("reporting.zig");
 const service = @import("service.zig");
+const wrapped_backend = @import("wrapped_backend.zig");
 const c = @cImport({
     @cInclude("sqlite3.h");
     if (builtin.os.tag != .windows) {
@@ -71,27 +75,9 @@ const WrappedDekRecord = struct {
     require_user_presence: ?bool = null,
 };
 
-const StatusSummary = struct {
-    initialized: bool,
-    config_path: []const u8,
-    state_dir: []const u8,
-    db_path: []const u8,
-    keys_path: []const u8,
-    backend: ?[]const u8,
-    backend_provider: ?[]const u8,
-    secure_enclave: bool,
-    user_presence_required: ?bool,
-    security_mode: []const u8,
-    profile_count: usize,
-    grant_count: usize,
-    grant_state: []const u8,
-};
-
-const BackendMetadata = struct {
-    provider: ?[]const u8,
-    secure_enclave: bool,
-    user_presence_required: ?bool,
-};
+const StatusSummary = reporting.StatusSummary;
+const GrantStatusRecord = reporting.GrantStatusRecord;
+const BackendMetadata = wrapped_backend.BackendMetadata;
 
 const ProfileRecord = struct {
     name: []const u8,
@@ -141,10 +127,7 @@ const RefreshLeaseStatus = struct {
     refresh_started_at: ?i64,
 };
 
-const EnvVar = struct {
-    key: []const u8,
-    value: []const u8,
-};
+const EnvVar = env_runtime.EnvVar;
 
 const ServiceDefinition = service.ServiceDefinition;
 const Paths = pathing.Paths;
@@ -172,45 +155,15 @@ const MacOsSecureEnclaveHelperResult = union(enum) {
     failure: MacOsSecureEnclaveFailureReason,
 };
 
-const WrapBackendOptions = struct {
-    secure_enclave: bool = false,
-    require_user_presence: bool = false,
-};
+const WrapBackendOptions = wrapped_backend.WrapBackendOptions;
 
-fn backendProviderLabel(backend: []const u8, secret_ref: ?[]const u8) ?[]const u8 {
-    if (!std.mem.eql(u8, backend, "platform-secure-store")) return null;
-
-    if (secret_ref) |ref| {
-        if (isMacOsSecureEnclaveSecretRef(ref)) return "macOS Secure Enclave";
-    }
-
-    return switch (builtin.os.tag) {
-        .macos => "macOS Keychain",
-        .windows => "Windows DPAPI",
-        else => "Secret Service",
-    };
-}
-
-fn backendMetadata(backend: []const u8, secret_ref: ?[]const u8, require_user_presence: ?bool) BackendMetadata {
-    const secure_enclave = isMacOsSecureEnclaveSecretRefOpt(secret_ref);
-    return .{
-        .provider = backendProviderLabel(backend, secret_ref),
-        .secure_enclave = secure_enclave,
-        .user_presence_required = if (secure_enclave) (require_user_presence orelse false) else null,
-    };
-}
-
-fn writeBackendMetadataLines(writer: anytype, metadata: BackendMetadata, prefix: []const u8) !void {
-    if (metadata.provider) |provider| {
-        try writer.print("{s}backend_provider: {s}\n", .{ prefix, provider });
-    }
-    if (metadata.secure_enclave) {
-        try writer.print("{s}secure_enclave: yes\n", .{prefix});
-    }
-    if (metadata.user_presence_required) |required| {
-        try writer.print("{s}user_presence_required: {s}\n", .{ prefix, if (required) "yes" else "no" });
-    }
-}
+const backendProviderLabel = wrapped_backend.backendProviderLabel;
+const backendMetadata = wrapped_backend.backendMetadata;
+const writeBackendMetadataLines = wrapped_backend.writeBackendMetadataLines;
+const runtimeGrantState = reporting.runtimeGrantState;
+const freeGrantStatus = reporting.freeGrantStatus;
+const freeStatusSummary = reporting.freeStatusSummary;
+const freeEnvVars = env_runtime.freeEnvVars;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -360,79 +313,30 @@ fn cmdProfile(allocator: std.mem.Allocator, args: []const []const u8, out: *std.
     defer temp_arena.deinit();
     const ta = temp_arena.allocator();
 
-    var name: ?[]const u8 = null;
-    var service_name: ?[]const u8 = null;
-    var discover_url: ?[]const u8 = null;
-    var provider: ?[]const u8 = null;
-    var auth_url: ?[]const u8 = null;
-    var token_url: ?[]const u8 = null;
-    var client_id: ?[]const u8 = null;
-    var scope: ?[]const u8 = null;
-    var redirect_uri: ?[]const u8 = null;
-    var env_kind: ?[]const u8 = null;
-    var base_url: ?[]const u8 = null;
-    var model: ?[]const u8 = null;
-    var audience: ?[]const u8 = null;
-    var client_secret: ?[]const u8 = null;
-
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--name")) {
-            name = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--service")) {
-            service_name = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--discover")) {
-            discover_url = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--provider")) {
-            provider = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--auth-url")) {
-            auth_url = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--token-url")) {
-            token_url = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--client-id")) {
-            client_id = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--scope")) {
-            scope = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--redirect-uri")) {
-            redirect_uri = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--env-kind")) {
-            env_kind = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--base-url")) {
-            base_url = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--model")) {
-            model = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--audience")) {
-            audience = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--client-secret")) {
-            client_secret = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
-        } else if (argx.isHelpArg(arg)) {
-            try out.writeAll("usage: ugrant profile add --name <name> [--service <preset> | --discover <issuer-or-url>] [--provider <provider>] [--auth-url <url>] [--token-url <url>] --client-id <id> [--scope <scope>] [--env-kind <kind>] [--redirect-uri <uri>] [--base-url <url>] [--model <model>] [--audience <aud>] [--client-secret <secret>]\n");
-            return;
-        } else {
-            try argx.writeUnknownOptionAndExit(err, arg);
-        }
-    }
+    const opts = command_params.parseProfileAdd(args, out, err) catch |e| switch (e) {
+        error.HelpDisplayed => return,
+        else => return e,
+    };
 
     var definition = ServiceDefinition{};
-    if (service_name) |svc| {
+    if (opts.service_name) |svc| {
         definition = service.mergeServiceDefinition(definition, try service.resolveServicePreset(svc));
     }
-    if (discover_url) |url| {
+    if (opts.discover_url) |url| {
         definition = service.mergeServiceDefinition(definition, try service.discoverService(ta, url));
     }
 
-    const final_provider = provider orelse definition.provider;
-    const final_auth_url = auth_url orelse definition.auth_url;
-    const final_token_url = token_url orelse definition.token_url;
-    const final_scope = scope orelse definition.scope;
-    const final_redirect_uri = redirect_uri orelse definition.redirect_uri orelse "urn:ietf:wg:oauth:2.0:oob";
-    const final_env_kind = env_kind orelse definition.env_kind;
-    const final_base_url = base_url orelse definition.base_url;
-    const final_model = model orelse definition.model;
-    const final_audience = audience orelse definition.audience;
+    const final_provider = opts.provider orelse definition.provider;
+    const final_auth_url = opts.auth_url orelse definition.auth_url;
+    const final_token_url = opts.token_url orelse definition.token_url;
+    const final_scope = opts.scope orelse definition.scope;
+    const final_redirect_uri = opts.redirect_uri orelse definition.redirect_uri orelse "urn:ietf:wg:oauth:2.0:oob";
+    const final_env_kind = opts.env_kind orelse definition.env_kind;
+    const final_base_url = opts.base_url orelse definition.base_url;
+    const final_model = opts.model orelse definition.model;
+    const final_audience = opts.audience orelse definition.audience;
 
-    if (name == null or final_provider == null or final_auth_url == null or final_token_url == null or client_id == null or final_scope == null or final_env_kind == null) {
+    if (opts.name == null or final_provider == null or final_auth_url == null or final_token_url == null or opts.client_id == null or final_scope == null or final_env_kind == null) {
         try err.writeAll("ugrant profile add: missing required flags\n");
         std.process.exit(2);
     }
@@ -450,7 +354,7 @@ fn cmdProfile(allocator: std.mem.Allocator, args: []const []const u8, out: *std.
     defer _ = c.sqlite3_close(db);
     try ensureSchema(db);
 
-    const enc_secret = if (client_secret) |secret| try encryptField(allocator, dek, "profiles", "client_secret", name.?, "_", secret) else null;
+    const enc_secret = if (opts.client_secret) |secret| try encryptField(allocator, dek, "profiles", "client_secret", opts.name.?, "_", secret) else null;
     defer if (enc_secret) |v| allocator.free(v);
 
     const sql =
@@ -460,11 +364,11 @@ fn cmdProfile(allocator: std.mem.Allocator, args: []const []const u8, out: *std.
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, sql.ptr, @as(c_int, @intCast(sql.len)), &stmt, null) != c.SQLITE_OK) return sqliteErr(db);
     defer _ = c.sqlite3_finalize(stmt);
-    try bindText(stmt.?, 1, name.?);
+    try bindText(stmt.?, 1, opts.name.?);
     try bindText(stmt.?, 2, final_provider.?);
     try bindText(stmt.?, 3, final_auth_url.?);
     try bindText(stmt.?, 4, final_token_url.?);
-    try bindText(stmt.?, 5, client_id.?);
+    try bindText(stmt.?, 5, opts.client_id.?);
     try bindText(stmt.?, 6, final_scope.?);
     try bindText(stmt.?, 7, final_redirect_uri);
     try bindText(stmt.?, 8, final_env_kind.?);
@@ -474,7 +378,7 @@ fn cmdProfile(allocator: std.mem.Allocator, args: []const []const u8, out: *std.
     try bindNullableText(stmt.?, 12, enc_secret);
     if (c.sqlite3_step(stmt.?) != c.SQLITE_DONE) return sqliteErr(db);
 
-    try out.print("profile saved: {s}\n", .{name.?});
+    try out.print("profile saved: {s}\n", .{opts.name.?});
 }
 
 fn cmdProfileList(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
@@ -503,34 +407,15 @@ fn cmdProfileList(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
 }
 
 fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.Writer, err: *std.Io.Writer) !void {
-    var profile_name: ?[]const u8 = null;
-    var code_override: ?[]const u8 = null;
-    var redirect_override: ?[]const u8 = null;
-    var no_open = false;
-    var allow_unsafe_bare_code = false;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--profile")) {
-            profile_name = try argx.nextValueOrUsage(args, &i, login_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--code")) {
-            code_override = try argx.nextValueOrUsage(args, &i, login_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--redirect-url")) {
-            redirect_override = try argx.nextValueOrUsage(args, &i, login_usage_text, err);
-        } else if (std.mem.eql(u8, arg, "--unsafe-bare-code")) {
-            allow_unsafe_bare_code = true;
-        } else if (argx.isHelpArg(arg)) {
-            try out.writeAll(login_usage_text);
-            return;
-        } else if (std.mem.eql(u8, arg, "--no-open")) no_open = true else {
-            try argx.writeUnknownOptionAndExit(err, arg);
-        }
-    }
-    if (profile_name == null) {
+    const opts = command_params.parseLogin(args, out, err) catch |e| switch (e) {
+        error.HelpDisplayed => return,
+        else => return e,
+    };
+    if (opts.profile_name == null) {
         try err.writeAll(login_usage_text);
         std.process.exit(2);
     }
-    if (code_override != null and !allow_unsafe_bare_code) {
+    if (opts.code_override != null and !opts.allow_unsafe_bare_code) {
         try err.writeAll("ugrant login: bare auth codes skip OAuth state validation, rerun with --unsafe-bare-code if you must use --code\n");
         std.process.exit(2);
     }
@@ -545,7 +430,7 @@ fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
 
     const db = try openDb(paths.db_path);
     defer _ = c.sqlite3_close(db);
-    const profile = try loadProfile(allocator, db, profile_name.?);
+    const profile = try loadProfile(allocator, db, opts.profile_name.?);
     defer freeProfile(allocator, profile);
 
     const verifier = try generateCodeVerifier(allocator);
@@ -558,13 +443,13 @@ fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     defer allocator.free(auth_url);
 
     try out.print("Open this URL and authorize:\n{s}\n\n", .{auth_url});
-    if (!no_open) {
+    if (!opts.no_open) {
         try maybeOpenUrl(auth_url);
     }
 
-    var final_code: ?[]u8 = if (code_override) |v| try allocator.dupe(u8, v) else null;
+    var final_code: ?[]u8 = if (opts.code_override) |v| try allocator.dupe(u8, v) else null;
     if (final_code == null) {
-        if (redirect_override) |redirect_url| {
+        if (opts.redirect_override) |redirect_url| {
             final_code = extractCodeFromRedirect(allocator, redirect_url, oauth_state) catch |e| switch (e) {
                 error.InvalidOAuthState => {
                     try err.writeAll("ugrant login: pasted redirect URL had the wrong OAuth state, restart login and try again\n");
@@ -579,7 +464,7 @@ fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
         if (final_code != null) try out.writeAll("localhost callback received\n");
     }
     if (final_code == null) {
-        if (allow_unsafe_bare_code) {
+        if (opts.allow_unsafe_bare_code) {
             try out.writeAll("Paste redirect URL or final code: ");
         } else {
             try out.writeAll("Paste full redirect URL (or rerun with --unsafe-bare-code to allow a bare auth code): ");
@@ -587,7 +472,7 @@ fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
         try out.flush();
         const pasted = try promptLine(allocator, "");
         defer freeSecret(allocator, pasted);
-        final_code = resolveManualCodeInput(allocator, pasted, oauth_state, allow_unsafe_bare_code) catch |e| switch (e) {
+        final_code = resolveManualCodeInput(allocator, pasted, oauth_state, opts.allow_unsafe_bare_code) catch |e| switch (e) {
             error.InvalidOAuthState => {
                 try err.writeAll("ugrant login: pasted redirect URL had the wrong OAuth state, restart login and try again\n");
                 std.process.exit(1);
@@ -598,7 +483,7 @@ fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
             },
             else => return e,
         };
-    } else if (redirect_override != null) {
+    } else if (opts.redirect_override != null) {
         // already allocated by extractCodeFromRedirect
     }
     defer if (final_code) |v| freeSecret(allocator, v);
@@ -3173,15 +3058,6 @@ fn persistGrantTokenResponse(allocator: std.mem.Allocator, db: *c.sqlite3, dek: 
     try execSql(db, "COMMIT;");
 }
 
-fn runtimeGrantState(state: []const u8, expires_at: ?i64) []const u8 {
-    if (std.mem.eql(u8, state, "access_token_valid")) {
-        if (expires_at) |ts| {
-            if (ts <= nowTs()) return "access_token_stale";
-        }
-    }
-    return state;
-}
-
 fn persistRefreshFailure(db: *c.sqlite3, profile_name: []const u8) !void {
     const sql =
         "UPDATE grants SET state='refresh_failed', refresh_started_at=NULL, refresh_owner=NULL, updated_at=unixepoch() WHERE profile_name=?1";
@@ -3298,35 +3174,7 @@ fn resolveEnv(allocator: std.mem.Allocator, profile_name: []const u8) ![]EnvVar 
     const grant = try loadUsableGrant(allocator, db, dek, profile, storage);
     defer freeGrant(allocator, grant);
 
-    var list = std.ArrayList(EnvVar){};
-    try list.append(allocator, .{ .key = try allocator.dupe(u8, "LLM_PROVIDER"), .value = try allocator.dupe(u8, profile.provider) });
-    if (profile.model) |model| try list.append(allocator, .{ .key = try allocator.dupe(u8, "LLM_MODEL"), .value = try allocator.dupe(u8, model) });
-
-    if (std.mem.eql(u8, profile.env_kind, "openai")) {
-        try list.append(allocator, .{ .key = try allocator.dupe(u8, "OPENAI_API_KEY"), .value = try allocator.dupe(u8, grant.access_token.?) });
-        if (profile.base_url) |base| try list.append(allocator, .{ .key = try allocator.dupe(u8, "OPENAI_BASE_URL"), .value = try allocator.dupe(u8, base) });
-    } else if (std.mem.eql(u8, profile.env_kind, "anthropic")) {
-        try list.append(allocator, .{ .key = try allocator.dupe(u8, "ANTHROPIC_API_KEY"), .value = try allocator.dupe(u8, grant.access_token.?) });
-    } else if (std.mem.eql(u8, profile.env_kind, "google-imap")) {
-        try list.append(allocator, .{ .key = try allocator.dupe(u8, "UGRANT_PROVIDER"), .value = try allocator.dupe(u8, profile.provider) });
-        try list.append(allocator, .{ .key = try allocator.dupe(u8, "UGRANT_ACCESS_TOKEN"), .value = try allocator.dupe(u8, grant.access_token.?) });
-        try list.append(allocator, .{ .key = try allocator.dupe(u8, "UGRANT_SUBJECT"), .value = try allocator.dupe(u8, grant.subject_key) });
-        if (grant.scope) |scope| try list.append(allocator, .{ .key = try allocator.dupe(u8, "UGRANT_SCOPE"), .value = try allocator.dupe(u8, scope) });
-    } else {
-        try list.append(allocator, .{ .key = try allocator.dupe(u8, "UGRANT_PROVIDER"), .value = try allocator.dupe(u8, profile.provider) });
-        try list.append(allocator, .{ .key = try allocator.dupe(u8, "UGRANT_ACCESS_TOKEN"), .value = try allocator.dupe(u8, grant.access_token.?) });
-        if (profile.base_url) |base| try list.append(allocator, .{ .key = try allocator.dupe(u8, "UGRANT_BASE_URL"), .value = try allocator.dupe(u8, base) });
-        if (grant.scope) |scope| try list.append(allocator, .{ .key = try allocator.dupe(u8, "UGRANT_SCOPE"), .value = try allocator.dupe(u8, scope) });
-    }
-    return list.toOwnedSlice(allocator);
-}
-
-fn freeEnvVars(allocator: std.mem.Allocator, envs: []EnvVar) void {
-    for (envs) |ev| {
-        allocator.free(ev.key);
-        allocator.free(ev.value);
-    }
-    allocator.free(envs);
+    return env_runtime.buildEnv(allocator, profile, grant);
 }
 
 fn loadGrant(allocator: std.mem.Allocator, db: *c.sqlite3, profile_name: []const u8, dek: []const u8) !GrantRecord {
@@ -3375,14 +3223,6 @@ fn freeGrant(allocator: std.mem.Allocator, grant: GrantRecord) void {
     if (grant.id_token) |v| allocator.free(v);
 }
 
-const GrantStatusRecord = struct {
-    provider: []const u8,
-    subject_key: []const u8,
-    scope: ?[]const u8,
-    state: []const u8,
-    expires_at: ?i64,
-};
-
 fn loadGrantStatus(allocator: std.mem.Allocator, db: *c.sqlite3, profile_name: []const u8) !?GrantStatusRecord {
     const sql = "SELECT provider, subject_key, scope, state, expires_at FROM grants WHERE profile_name=?1";
     var stmt: ?*c.sqlite3_stmt = null;
@@ -3397,13 +3237,6 @@ fn loadGrantStatus(allocator: std.mem.Allocator, db: *c.sqlite3, profile_name: [
         .state = try dupeColumnText(allocator, stmt.?, 3),
         .expires_at = nullableIntColumn(stmt.?, 4),
     };
-}
-
-fn freeGrantStatus(allocator: std.mem.Allocator, rec: GrantStatusRecord) void {
-    allocator.free(rec.provider);
-    allocator.free(rec.subject_key);
-    if (rec.scope) |v| allocator.free(v);
-    allocator.free(rec.state);
 }
 
 fn loadProfileList(allocator: std.mem.Allocator, db: *c.sqlite3) ![]ProfileListRecord {
@@ -3532,17 +3365,6 @@ fn overallGrantState(db: *c.sqlite3) ![]const u8 {
     if (std.mem.eql(u8, state, "access_token_valid")) return "access_token_valid";
     if (std.mem.eql(u8, state, "mixed")) return "mixed";
     return "authorized_no_access_token";
-}
-
-fn freeStatusSummary(allocator: std.mem.Allocator, summary: StatusSummary) void {
-    allocator.free(summary.config_path);
-    allocator.free(summary.state_dir);
-    allocator.free(summary.db_path);
-    allocator.free(summary.keys_path);
-    if (summary.backend) |v| allocator.free(v);
-    if (summary.backend_provider) |v| allocator.free(v);
-    allocator.free(summary.security_mode);
-    allocator.free(summary.grant_state);
 }
 
 fn countRows(db: *c.sqlite3, table: []const u8) !usize {
