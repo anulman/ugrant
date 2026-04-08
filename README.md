@@ -82,7 +82,7 @@ macOS and Linux:
 curl -fsSLo /tmp/ugrant-install.sh https://www.ugrant.sh/install.sh && sh /tmp/ugrant-install.sh
 ```
 
-Windows PowerShell:
+Windows PowerShell (x64 and ARM64):
 
 ```powershell
 irm https://www.ugrant.sh/install.ps1 | iex
@@ -92,7 +92,7 @@ Both installers prefer minisign verification when `minisign` is available. If no
 
 ## Windows notes
 
-- `install.ps1` installs `ugrant.exe` to `%LOCALAPPDATA%\Programs\ugrant\bin` and updates your user PATH.
+- `install.ps1` installs the matching Windows build, including native ARM64 releases, to `%LOCALAPPDATA%\Programs\ugrant\bin` and updates your user PATH.
 - PATH updates only affect new shells, so open a fresh PowerShell window before running `ugrant`. If you want to keep the current window, run `& "$env:LOCALAPPDATA\Programs\ugrant\bin\ugrant.exe" ...` directly.
 - Config lives at `%USERPROFILE%\.config\ugrant\config.toml`. State lives at `%USERPROFILE%\.local\state\ugrant\` with `state.db` and wrapped key material.
 - `ugrant init` on Windows prefers the `platform-secure-store` backend, which uses the native Windows secure store.
@@ -131,7 +131,7 @@ That keeps the command surface the same, while making PowerShell automation less
 
 Minisign is the preferred authenticity check for published archives.
 
-Windows releases use `.zip` archives, for example `TARGET=windows-x86_64` with `ARCHIVE="ugrant-${TAG}-${TARGET}.zip"`.
+Windows releases use `.zip` archives, for example `TARGET=windows-x86_64` or `TARGET=windows-arm64` with `ARCHIVE="ugrant-${TAG}-${TARGET}.zip"`.
 
 ```bash
 TAG=v0.1.0

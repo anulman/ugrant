@@ -1,7 +1,7 @@
 const GITHUB_REPO = "https://github.com/anulman/ugrant";
 const GITHUB_API_LATEST = "https://api.github.com/repos/anulman/ugrant/releases/latest";
 const WWW_HOST = "www.ugrant.sh";
-const SUPPORTED_TARGETS = new Set(["linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64", "windows-x86_64"]);
+const SUPPORTED_TARGETS = new Set(["linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64", "windows-x86_64", "windows-arm64"]);
 const MINISIGN_PUBLIC_KEY_COMMENT = "minisign public key for ugrant releases";
 const MINISIGN_PUBLIC_KEY = "RWROMGoscMzrnBn4DAQctEu3E+Y5totRluTj+M/IT0w6ZIuaNjkepTAB";
 const MINISIGN_PUBLIC_KEY_FILE = `untrusted comment: ${MINISIGN_PUBLIC_KEY_COMMENT}\n${MINISIGN_PUBLIC_KEY}\n`;
@@ -12,6 +12,7 @@ const INSTALL_KIND_SUFFIX = {
 };
 const TARGET_ARCHIVE_EXTENSION = {
   "windows-x86_64": ".zip",
+  "windows-arm64": ".zip",
 };
 
 export default {
@@ -135,6 +136,7 @@ function pickRequestedArtifact(userAgent) {
   const isArm64 = /arm64|aarch64/.test(ua) || /mac os x.*arm|applewebkit.*arm/.test(ua);
   const isX64 = /x86_64|win64|x64|amd64|intel/.test(ua);
 
+  if (isWindows && isArm64) return "windows-arm64";
   if (isWindows && isX64 && !isArm64) return "windows-x86_64";
   if (isMac && isArm64) return "macos-arm64";
   if (isMac && isX64) return "macos-x86_64";
@@ -272,6 +274,7 @@ $verificationSummary = ""
 
 switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
   "X64" { $target = "windows-x86_64" }
+  "Arm64" { $target = "windows-arm64" }
   default {
     Write-Host "See https://github.com/anulman/ugrant/releases/latest"
     throw "Unsupported Windows architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
