@@ -77,10 +77,18 @@ const StatusSummary = struct {
     keys_path: []const u8,
     backend: ?[]const u8,
     backend_provider: ?[]const u8,
+    secure_enclave: bool,
+    user_presence_required: ?bool,
     security_mode: []const u8,
     profile_count: usize,
     grant_count: usize,
     grant_state: []const u8,
+};
+
+const BackendMetadata = struct {
+    provider: ?[]const u8,
+    secure_enclave: bool,
+    user_presence_required: ?bool,
 };
 
 const ProfileRecord = struct {
@@ -167,6 +175,27 @@ fn backendProviderLabel(backend: []const u8, secret_ref: ?[]const u8) ?[]const u
         .windows => "Windows DPAPI",
         else => "Secret Service",
     };
+}
+
+fn backendMetadata(backend: []const u8, secret_ref: ?[]const u8, require_user_presence: ?bool) BackendMetadata {
+    const secure_enclave = isMacOsSecureEnclaveSecretRefOpt(secret_ref);
+    return .{
+        .provider = backendProviderLabel(backend, secret_ref),
+        .secure_enclave = secure_enclave,
+        .user_presence_required = if (secure_enclave) (require_user_presence orelse false) else null,
+    };
+}
+
+fn writeBackendMetadataLines(writer: anytype, metadata: BackendMetadata, prefix: []const u8) !void {
+    if (metadata.provider) |provider| {
+        try writer.print("{s}backend_provider: {s}\n", .{ prefix, provider });
+    }
+    if (metadata.secure_enclave) {
+        try writer.print("{s}secure_enclave: yes\n", .{prefix});
+    }
+    if (metadata.user_presence_required) |required| {
+        try writer.print("{s}user_presence_required: {s}\n", .{ prefix, if (required) "yes" else "no" });
+    }
 }
 
 pub fn main() !void {
@@ -291,10 +320,9 @@ fn cmdInit(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.
     try ensureSchema(db);
     try tightenSecretStatePermissions(paths);
 
+    const metadata = backendMetadata(wrapped.backend, wrapped.secret_ref, wrapped.require_user_presence);
     try out.print("initialized: yes\nbackend: {s}\n", .{wrapped.backend});
-    if (backendProviderLabel(wrapped.backend, wrapped.secret_ref)) |provider| {
-        try out.print("backend_provider: {s}\n", .{provider});
-    }
+    try writeBackendMetadataLines(out, metadata, "");
     try out.print("keys: {s}\ndb: {s}\n", .{ paths.keys_path, paths.db_path });
 }
 
@@ -869,14 +897,12 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     defer _ = c.sqlite3_close(db);
     const stats = try performRekey(allocator, db, paths.keys_path, wrapped, current_wrap_secret.secret, target_backend, target_wrap.secret, target_wrap.secret_ref, target_wrap.tpm2_pub_b64, target_wrap.tpm2_priv_b64, target_wrap.secure_enclave_ephemeral_pub_b64, target_wrap.require_user_presence);
     try tightenSecretStatePermissions(paths);
+    const target_metadata = backendMetadata(target_backend, target_wrap.secret_ref, target_wrap.require_user_presence);
+    const previous_metadata = backendMetadata(wrapped.backend, wrapped.secret_ref, wrapped.require_user_presence);
     try out.print("rekey: ok\nbackend: {s}\n", .{target_backend});
-    if (backendProviderLabel(target_backend, target_wrap.secret_ref)) |provider| {
-        try out.print("backend_provider: {s}\n", .{provider});
-    }
+    try writeBackendMetadataLines(out, target_metadata, "");
     try out.print("previous_backend: {s}\n", .{wrapped.backend});
-    if (backendProviderLabel(wrapped.backend, wrapped.secret_ref)) |provider| {
-        try out.print("previous_backend_provider: {s}\n", .{provider});
-    }
+    try writeBackendMetadataLines(out, previous_metadata, "previous_");
     try out.print(
         "key_version: {}\nprofiles_rewritten: {}\ngrants_rewritten: {}\n",
         .{ stats.key_version, stats.profiles_rewritten, stats.grants_rewritten },
@@ -936,9 +962,11 @@ fn cmdStatus(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
 
     try out.print("initialized: {s}\nconfig: {s}\nstate_dir: {s}\ndb: {s}\nkeys: {s}\nbackend: {s}\n", .{ if (summary.initialized) "yes" else "no", summary.config_path, summary.state_dir, summary.db_path, summary.keys_path, summary.backend orelse "none" });
     if (summary.backend != null) {
-        if (summary.backend_provider) |provider| {
-            try out.print("backend_provider: {s}\n", .{provider});
-        }
+        try writeBackendMetadataLines(out, .{
+            .provider = summary.backend_provider,
+            .secure_enclave = summary.secure_enclave,
+            .user_presence_required = summary.user_presence_required,
+        }, "");
     }
     try out.print("security_mode: {s}\nprofiles: {}\ngrants: {}\nstate: {s}\n", .{ summary.security_mode, summary.profile_count, summary.grant_count, summary.grant_state });
 
@@ -976,10 +1004,9 @@ fn cmdDoctor(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
     }
     const wrapped = try loadWrappedDek(allocator, paths.keys_path);
     defer freeWrappedDekRecord(allocator, wrapped);
+    const metadata = backendMetadata(wrapped.backend, wrapped.secret_ref, wrapped.require_user_presence);
     try out.print("backend: {s}\n", .{wrapped.backend});
-    if (backendProviderLabel(wrapped.backend, wrapped.secret_ref)) |provider| {
-        try out.print("backend_provider: {s}\n", .{provider});
-    }
+    try writeBackendMetadataLines(out, metadata, "");
     const dek = unwrapDek(allocator, wrapped) catch |e| switch (e) {
         error.InvalidWrappedDek => {
             if (std.mem.eql(u8, wrapped.backend, "platform-secure-store")) {
@@ -3345,6 +3372,8 @@ fn collectStatusSummary(allocator: std.mem.Allocator, paths: Paths) !StatusSumma
     const initialized = (try fileExists(paths.db_path)) and (try fileExists(paths.keys_path));
     var backend: ?[]const u8 = null;
     var backend_provider: ?[]const u8 = null;
+    var secure_enclave = false;
+    var user_presence_required: ?bool = null;
     var security_mode: []const u8 = "uninitialized";
     var profile_count: usize = 0;
     var grant_count: usize = 0;
@@ -3352,10 +3381,13 @@ fn collectStatusSummary(allocator: std.mem.Allocator, paths: Paths) !StatusSumma
     if (initialized) {
         const wrapped = try loadWrappedDek(allocator, paths.keys_path);
         defer freeWrappedDekRecord(allocator, wrapped);
+        const metadata = backendMetadata(wrapped.backend, wrapped.secret_ref, wrapped.require_user_presence);
         backend = try allocator.dupe(u8, wrapped.backend);
-        if (backendProviderLabel(wrapped.backend, wrapped.secret_ref)) |provider| {
+        if (metadata.provider) |provider| {
             backend_provider = try allocator.dupe(u8, provider);
         }
+        secure_enclave = metadata.secure_enclave;
+        user_presence_required = metadata.user_presence_required;
         security_mode = if (std.mem.eql(u8, wrapped.backend, "insecure-keyfile") or wrapped.kdf == null) "degraded" else "normal";
         const db = try openDb(paths.db_path);
         defer _ = c.sqlite3_close(db);
@@ -3371,6 +3403,8 @@ fn collectStatusSummary(allocator: std.mem.Allocator, paths: Paths) !StatusSumma
         .keys_path = try allocator.dupe(u8, paths.keys_path),
         .backend = backend,
         .backend_provider = backend_provider,
+        .secure_enclave = secure_enclave,
+        .user_presence_required = user_presence_required,
         .security_mode = try allocator.dupe(u8, security_mode),
         .profile_count = profile_count,
         .grant_count = grant_count,
@@ -3550,6 +3584,72 @@ test "platform secure store provider label matches the local OS" {
 
 test "secure enclave records report secure enclave backend provider" {
     try std.testing.expectEqualStrings("macOS Secure Enclave", backendProviderLabel("platform-secure-store", "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:3").?);
+}
+
+test "backend metadata lines include secure enclave state and user presence" {
+    const allocator = std.testing.allocator;
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+
+    var writer = out.writer(allocator);
+    try writeBackendMetadataLines(&writer, backendMetadata("platform-secure-store", "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:3", true), "previous_");
+
+    const rendered = try out.toOwnedSlice(allocator);
+    defer allocator.free(rendered);
+    try std.testing.expectEqualStrings(
+        "previous_backend_provider: macOS Secure Enclave\n" ++
+            "previous_secure_enclave: yes\n" ++
+            "previous_user_presence_required: yes\n",
+        rendered,
+    );
+}
+
+test "status summary reports secure enclave metadata" {
+    const allocator = std.testing.allocator;
+    var vault = try setupTestVault();
+    defer vault.deinit(allocator);
+
+    var dek: [dek_len]u8 = [_]u8{0x42} ** dek_len;
+    const wrapped = try wrapDekForBackend(allocator, "platform-secure-store", 2, "secure-enclave-wrap-secret", &dek, .{
+        .secret = @constCast("secure-enclave-wrap-secret"),
+        .secret_ref = "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:2",
+        .secure_enclave_ephemeral_pub_b64 = "ZXBoZW1lcmFsLXB1Yg==",
+        .require_user_presence = true,
+    });
+    defer freeWrappedDekRecord(allocator, wrapped);
+    try saveWrappedDek(vault.keys_path, wrapped);
+
+    const config_path = try std.fs.path.join(allocator, &.{ vault.base_path, "config.toml" });
+    const state_dir = try allocator.dupe(u8, vault.base_path);
+    const db_path = try allocator.dupe(u8, vault.db_path);
+    const keys_path = try allocator.dupe(u8, vault.keys_path);
+    const paths = Paths{
+        .config_path = config_path,
+        .state_dir = state_dir,
+        .db_path = db_path,
+        .keys_path = keys_path,
+    };
+    defer paths.deinit(allocator);
+
+    const summary = try collectStatusSummary(allocator, paths);
+    defer freeStatusSummary(allocator, summary);
+
+    try std.testing.expect(summary.initialized);
+    try std.testing.expectEqualStrings("platform-secure-store", summary.backend.?);
+    try std.testing.expectEqualStrings("macOS Secure Enclave", summary.backend_provider.?);
+    try std.testing.expect(summary.secure_enclave);
+    try std.testing.expectEqual(true, summary.user_presence_required.?);
+    try std.testing.expectEqual(@as(usize, 1), summary.profile_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.grant_count);
+}
+
+test "explicit secure enclave wrap never falls back to plain platform store" {
+    if (builtin.os.tag == .macos or envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return;
+
+    try std.testing.expectError(
+        error.WrapBackendUnavailable,
+        platformStoreWrapSecret(std.testing.allocator, null, 7, null, .{ .secure_enclave = true, .require_user_presence = true }),
+    );
 }
 
 test "secure enclave platform store wraps and unwraps via synthetic provider" {
@@ -4019,6 +4119,68 @@ test "rekey can switch from tpm2 to platform secure store" {
 
     const grant = try loadGrant(allocator, vault.db, "watcher", new_dek);
     defer freeGrant(allocator, grant);
+    try std.testing.expectEqualStrings("refresh-token-def", grant.refresh_token.?);
+}
+
+test "rekey can switch between secure enclave and plain platform store metadata" {
+    const allocator = std.testing.allocator;
+    var vault = try setupTestVault();
+    defer vault.deinit(allocator);
+
+    const secure_stats = try performRekey(
+        allocator,
+        vault.db,
+        vault.keys_path,
+        vault.wrapped,
+        "insecure-local-keyfile",
+        "platform-secure-store",
+        "secure-enclave-wrap-secret",
+        "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:2",
+        null,
+        null,
+        "ZXBoZW1lcmFsLXB1Yg==",
+        true,
+    );
+    try std.testing.expectEqual(@as(u32, 2), secure_stats.key_version);
+
+    const secure_record = try loadWrappedDek(allocator, vault.keys_path);
+    defer freeWrappedDekRecord(allocator, secure_record);
+    try std.testing.expect(isMacOsSecureEnclaveRecord(secure_record));
+    try std.testing.expectEqualStrings("platform-secure-store", secure_record.backend);
+    try std.testing.expectEqualStrings(hkdf_sha256_kdf_name, secure_record.kdf.?);
+    try std.testing.expectEqual(true, secure_record.require_user_presence.?);
+    try std.testing.expectEqualStrings("ZXBoZW1lcmFsLXB1Yg==", secure_record.secure_enclave_ephemeral_pub_b64.?);
+
+    const plain_stats = try performRekey(
+        allocator,
+        vault.db,
+        vault.keys_path,
+        secure_record,
+        "secure-enclave-wrap-secret",
+        "platform-secure-store",
+        "platform-store-test-secret",
+        "macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:3",
+        null,
+        null,
+        null,
+        false,
+    );
+    try std.testing.expectEqual(@as(u32, 3), plain_stats.key_version);
+
+    const updated_record = try loadWrappedDek(allocator, vault.keys_path);
+    defer freeWrappedDekRecord(allocator, updated_record);
+    try std.testing.expectEqualStrings("platform-secure-store", updated_record.backend);
+    try std.testing.expect(!isMacOsSecureEnclaveRecord(updated_record));
+    try std.testing.expectEqualStrings(argon2_kdf_name, updated_record.kdf.?);
+    try std.testing.expectEqualStrings("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:3", updated_record.secret_ref.?);
+    try std.testing.expect(updated_record.secure_enclave_ephemeral_pub_b64 == null);
+    try std.testing.expect(updated_record.require_user_presence == null);
+
+    const new_dek = try unwrapDekWithSecret(allocator, updated_record, "platform-store-test-secret");
+    defer allocator.free(new_dek);
+    const grant = try loadGrant(allocator, vault.db, "watcher", new_dek);
+    defer freeGrant(allocator, grant);
+    try std.testing.expectEqualStrings("access-token-abc", grant.access_token.?);
     try std.testing.expectEqualStrings("refresh-token-def", grant.refresh_token.?);
 }
 
