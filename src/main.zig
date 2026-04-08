@@ -2725,6 +2725,13 @@ test "macos keychain secret refs are strict and versioned" {
     try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:7;extra=x"));
 }
 
+test "macos keychain secret refs reject malformed prefixes and numeric versions" {
+    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("secret-service:service=dev.ugrant.platform-secure-store;account=dek:7"));
+    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-storeaccount=dek:7"));
+    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:seven"));
+    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:4294967296"));
+}
+
 test "platform secure store provider label matches the local OS" {
     const provider = backendProviderLabel("platform-secure-store").?;
 
@@ -3137,6 +3144,41 @@ test "rekey can switch from tpm2 to platform secure store" {
 
     const grant = try loadGrant(allocator, vault.db, "watcher", new_dek);
     defer freeGrant(allocator, grant);
+    try std.testing.expectEqualStrings("refresh-token-def", grant.refresh_token.?);
+}
+
+test "macos platform secure store hook supports rekey migration" {
+    if (builtin.os.tag != .macos or !envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return;
+
+    const allocator = std.testing.allocator;
+    var vault = try setupTestVault();
+    defer vault.deinit(allocator);
+
+    const created = try platformStoreWrapSecret(allocator, vault.keys_path, 2, null);
+    defer freeWrapSecret(allocator, created);
+    try std.testing.expectEqualStrings("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:2", created.secret_ref.?);
+
+    const stats = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", "platform-secure-store", created.secret, created.secret_ref, null, null);
+    try std.testing.expectEqual(@as(u32, 2), stats.key_version);
+
+    const updated_record = try loadWrappedDek(allocator, vault.keys_path);
+    defer freeWrappedDekRecord(allocator, updated_record);
+    try std.testing.expectEqualStrings("platform-secure-store", updated_record.backend);
+    try std.testing.expectEqual(@as(u32, 2), updated_record.key_version);
+    try std.testing.expectEqualStrings(created.secret_ref.?, updated_record.secret_ref.?);
+
+    const loaded = try platformStoreWrapSecret(allocator, null, updated_record.key_version, updated_record);
+    defer freeWrapSecret(allocator, loaded);
+    try std.testing.expectEqualStrings(created.secret, loaded.secret);
+    try std.testing.expectEqualStrings(created.secret_ref.?, loaded.secret_ref.?);
+
+    const new_dek = try unwrapDek(allocator, updated_record);
+    defer allocator.free(new_dek);
+    try std.testing.expect(!std.mem.eql(u8, vault.dek, new_dek));
+
+    const grant = try loadGrant(allocator, vault.db, "watcher", new_dek);
+    defer freeGrant(allocator, grant);
+    try std.testing.expectEqualStrings("access-token-abc", grant.access_token.?);
     try std.testing.expectEqualStrings("refresh-token-def", grant.refresh_token.?);
 }
 
