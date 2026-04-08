@@ -167,6 +167,22 @@ minisign -G -W -p minisign.pub -s ugrant.minisign.key
 
 That creates an unencrypted secret key, which is simpler for GitHub Actions automation. Store the contents of `ugrant.minisign.key` in the `MINISIGN_SECRET_KEY` repository secret, and commit `minisign.pub`.
 
+## QA scripts
+
+For live lifecycle checks against the built binary, use:
+
+- `bash scripts/qa-live-smoke.sh`
+- `pwsh -File .\scripts\qa-live-smoke.ps1`
+
+Those smoke scripts cover isolated-home init, status, doctor, profile add, and rekey transitions without needing a real OAuth login.
+
+For manual installer QA against the public install endpoints, use:
+
+- `bash scripts/manual-installer-qa-unix.sh`
+- `pwsh -File .\scripts\manual-installer-qa-windows.ps1`
+
+Those installer scripts exercise fresh install, reinstall, repair-after-clobber, and basic post-install command checks in an isolated temp home/profile.
+
 ## Project files
 
 - `src/main.zig` — CLI implementation
