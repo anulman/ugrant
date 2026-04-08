@@ -158,6 +158,18 @@ const MacOsSecureEnclaveRef = struct {
     key_version: u32,
 };
 
+const MacOsSecureEnclaveFailureReason = enum {
+    user_cancelled,
+    unavailable,
+    key_missing,
+    access_denied,
+};
+
+const MacOsSecureEnclaveHelperResult = union(enum) {
+    success: WrapSecret,
+    failure: MacOsSecureEnclaveFailureReason,
+};
+
 const WrapBackendOptions = struct {
     secure_enclave: bool = false,
     require_user_presence: bool = false,
@@ -1007,13 +1019,20 @@ fn cmdDoctor(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
     const metadata = backendMetadata(wrapped.backend, wrapped.secret_ref, wrapped.require_user_presence);
     try out.print("backend: {s}\n", .{wrapped.backend});
     try writeBackendMetadataLines(out, metadata, "");
+    if (std.mem.eql(u8, wrapped.backend, "platform-secure-store") and isMacOsSecureEnclaveRecord(wrapped)) {
+        const dek = try unwrapMacOsSecureEnclaveDekForDoctor(allocator, wrapped, err);
+        defer allocator.free(dek);
+
+        const db = try openDb(paths.db_path);
+        defer _ = c.sqlite3_close(db);
+        try ensureSchema(db);
+        try tightenSecretStatePermissions(paths);
+        try out.writeAll("dek_unwrap: ok\nschema: ok\npermissions: ok\n");
+        return;
+    }
     const dek = unwrapDek(allocator, wrapped) catch |e| switch (e) {
         error.InvalidWrappedDek => {
             if (std.mem.eql(u8, wrapped.backend, "platform-secure-store")) {
-                if (isMacOsSecureEnclaveRecord(wrapped)) {
-                    try err.writeAll("doctor: macOS Secure Enclave key reference is invalid\n");
-                    std.process.exit(1);
-                }
                 if (builtin.os.tag == .macos) {
                     try err.writeAll("doctor: macOS Keychain secret reference is invalid\n");
                     std.process.exit(1);
@@ -1023,10 +1042,6 @@ fn cmdDoctor(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
         },
         error.WrapBackendUnavailable => {
             if (std.mem.eql(u8, wrapped.backend, "platform-secure-store")) {
-                if (isMacOsSecureEnclaveRecord(wrapped)) {
-                    try err.writeAll("doctor: macOS Secure Enclave key missing, unsupported, or inaccessible\n");
-                    std.process.exit(1);
-                }
                 if (builtin.os.tag == .macos) {
                     try err.writeAll("doctor: macOS Keychain item missing or inaccessible\n");
                     std.process.exit(1);
@@ -1380,17 +1395,64 @@ fn unprotectDpapiBytes(allocator: std.mem.Allocator, protected: []const u8) ![]u
 const macos_secure_enclave_helper_script =
     "import CryptoKit\n" ++
     "import Foundation\n" ++
+    "import LocalAuthentication\n" ++
     "import Security\n" ++
     "let wrapMaterialService = \"dev.ugrant.secure-enclave.wrap-material\"\n" ++
     "let wrapMaterialVersion = 1\n" ++
     "let wrapMaterialInfo = Data(\"ugrant-secure-enclave-wrap-material\".utf8)\n" ++
-    "func fail(_ message: String) -> Never {\n" ++
-    "    FileHandle.standardError.write(Data((message + \"\\n\").utf8))\n" ++
+    "func emitError(reason: String, message: String) {\n" ++
+    "    let payload = [\"reason\": reason, \"message\": message]\n" ++
+    "    if let data = try? JSONSerialization.data(withJSONObject: payload, options: []) {\n" ++
+    "        FileHandle.standardError.write(data)\n" ++
+    "        FileHandle.standardError.write(Data(\"\\n\".utf8))\n" ++
+    "        return\n" ++
+    "    }\n" ++
+    "    FileHandle.standardError.write(Data((reason + \": \" + message + \"\\n\").utf8))\n" ++
+    "}\n" ++
+    "func reasonForStatus(_ status: OSStatus) -> String {\n" ++
+    "    switch status {\n" ++
+    "    case errSecUserCanceled:\n" ++
+    "        return \"user_cancelled\"\n" ++
+    "    case errSecItemNotFound:\n" ++
+    "        return \"key_missing\"\n" ++
+    "    case errSecAuthFailed, errSecInteractionNotAllowed, errSecInteractionRequired:\n" ++
+    "        return \"access_denied\"\n" ++
+    "    case errSecUnimplemented, errSecNotAvailable:\n" ++
+    "        return \"unavailable\"\n" ++
+    "    default:\n" ++
+    "        return \"unavailable\"\n" ++
+    "    }\n" ++
+    "}\n" ++
+    "func reasonForNSError(_ error: NSError) -> String {\n" ++
+    "    if error.domain == LAError.errorDomain {\n" ++
+    "        switch error.code {\n" ++
+    "        case LAError.userCancel.rawValue:\n" ++
+    "            return \"user_cancelled\"\n" ++
+    "        case LAError.authenticationFailed.rawValue,\n" ++
+    "             LAError.notInteractive.rawValue,\n" ++
+    "             LAError.appCancel.rawValue,\n" ++
+    "             LAError.systemCancel.rawValue:\n" ++
+    "            return \"access_denied\"\n" ++
+    "        case LAError.passcodeNotSet.rawValue,\n" ++
+    "             LAError.biometryNotAvailable.rawValue,\n" ++
+    "             LAError.biometryNotEnrolled.rawValue,\n" ++
+    "             LAError.biometryLockout.rawValue:\n" ++
+    "            return \"unavailable\"\n" ++
+    "        default:\n" ++
+    "            break\n" ++
+    "        }\n" ++
+    "    }\n" ++
+    "    return reasonForStatus(OSStatus(error.code))\n" ++
+    "}\n" ++
+    "func fail(_ message: String, reason: String = \"unavailable\") -> Never {\n" ++
+    "    emitError(reason: reason, message: message)\n" ++
     "    exit(1)\n" ++
     "}\n" ++
-    "func secError(_ error: Unmanaged<CFError>?) -> String {\n" ++
-    "    guard let error else { return \"unknown Security error\" }\n" ++
-    "    return String(describing: error.takeRetainedValue())\n" ++
+    "func secError(_ error: Unmanaged<CFError>?) -> (reason: String, message: String) {\n" ++
+    "    guard let error else { return (\"unavailable\", \"unknown Security error\") }\n" ++
+    "    let value = error.takeRetainedValue()\n" ++
+    "    let nsError = value as Error as NSError\n" ++
+    "    return (reasonForNSError(nsError), String(describing: value))\n" ++
     "}\n" ++
     "func appTag(_ keyVersion: Int) -> String {\n" ++
     "    \"dev.ugrant.secure-enclave.dek:\\(keyVersion)\"\n" ++
@@ -1398,7 +1460,7 @@ const macos_secure_enclave_helper_script =
     "func randomData(_ count: Int) -> Data {\n" ++
     "    var bytes = [UInt8](repeating: 0, count: count)\n" ++
     "    let status = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)\n" ++
-    "    guard status == errSecSuccess else { fail(\"SecRandomCopyBytes failed: \\(status)\") }\n" ++
+    "    guard status == errSecSuccess else { fail(\"SecRandomCopyBytes failed: \\(status)\", reason: reasonForStatus(status)) }\n" ++
     "    return Data(bytes)\n" ++
     "}\n" ++
     "func deleteKey(tag: String) {\n" ++
@@ -1409,7 +1471,7 @@ const macos_secure_enclave_helper_script =
     "    ]\n" ++
     "    let status = SecItemDelete(query as CFDictionary)\n" ++
     "    if status != errSecSuccess && status != errSecItemNotFound {\n" ++
-    "        fail(\"SecItemDelete failed: \\(status)\")\n" ++
+    "        fail(\"SecItemDelete failed: \\(status)\", reason: reasonForStatus(status))\n" ++
     "    }\n" ++
     "}\n" ++
     "func deleteWrapMaterial(tag: String) {\n" ++
@@ -1420,7 +1482,7 @@ const macos_secure_enclave_helper_script =
     "    ]\n" ++
     "    let status = SecItemDelete(query as CFDictionary)\n" ++
     "    if status != errSecSuccess && status != errSecItemNotFound {\n" ++
-    "        fail(\"SecItemDelete wrap material failed: \\(status)\")\n" ++
+    "        fail(\"SecItemDelete wrap material failed: \\(status)\", reason: reasonForStatus(status))\n" ++
     "    }\n" ++
     "}\n" ++
     "func createEphemeralPrivateKey() -> SecKey {\n" ++
@@ -1433,7 +1495,8 @@ const macos_secure_enclave_helper_script =
     "        ],\n" ++
     "    ]\n" ++
     "    guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) else {\n" ++
-    "        fail(\"ephemeral key generation failed: \\(secError(error))\")\n" ++
+    "        let failure = secError(error)\n" ++
+    "        fail(\"ephemeral key generation failed: \\(failure.message)\", reason: failure.reason)\n" ++
     "    }\n" ++
     "    return key\n" ++
     "}\n" ++
@@ -1457,7 +1520,8 @@ const macos_secure_enclave_helper_script =
     "    ]\n" ++
     "    var error: Unmanaged<CFError>?\n" ++
     "    guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) else {\n" ++
-    "        fail(\"secure enclave key generation failed: \\(secError(error))\")\n" ++
+    "        let failure = secError(error)\n" ++
+    "        fail(\"secure enclave key generation failed: \\(failure.message)\", reason: failure.reason)\n" ++
     "    }\n" ++
     "    return key\n" ++
     "}\n" ++
@@ -1471,7 +1535,7 @@ const macos_secure_enclave_helper_script =
     "    var item: CFTypeRef?\n" ++
     "    let status = SecItemCopyMatching(query as CFDictionary, &item)\n" ++
     "    guard status == errSecSuccess, let key = item as! SecKey? else {\n" ++
-    "        fail(\"SecItemCopyMatching failed: \\(status)\")\n" ++
+    "        fail(\"SecItemCopyMatching failed: \\(status)\", reason: reasonForStatus(status))\n" ++
     "    }\n" ++
     "    return key\n" ++
     "}\n" ++
@@ -1479,7 +1543,8 @@ const macos_secure_enclave_helper_script =
     "    guard let pub = SecKeyCopyPublicKey(key) else { fail(\"missing public key\") }\n" ++
     "    var error: Unmanaged<CFError>?\n" ++
     "    guard let data = SecKeyCopyExternalRepresentation(pub, &error) as Data? else {\n" ++
-    "        fail(\"public key export failed: \\(secError(error))\")\n" ++
+    "        let failure = secError(error)\n" ++
+    "        fail(\"public key export failed: \\(failure.message)\", reason: failure.reason)\n" ++
     "    }\n" ++
     "    return data\n" ++
     "}\n" ++
@@ -1494,7 +1559,7 @@ const macos_secure_enclave_helper_script =
     "    let status = SecItemCopyMatching(query as CFDictionary, &item)\n" ++
     "    if status == errSecItemNotFound { return nil }\n" ++
     "    guard status == errSecSuccess, let data = item as? Data else {\n" ++
-    "        fail(\"SecItemCopyMatching wrap material failed: \\(status)\")\n" ++
+    "        fail(\"SecItemCopyMatching wrap material failed: \\(status)\", reason: reasonForStatus(status))\n" ++
     "    }\n" ++
     "    return data\n" ++
     "}\n" ++
@@ -1515,7 +1580,7 @@ const macos_secure_enclave_helper_script =
     "    ]\n" ++
     "    let status = SecItemAdd(query as CFDictionary, nil)\n" ++
     "    guard status == errSecSuccess else {\n" ++
-    "        fail(\"SecItemAdd wrap material failed: \\(status)\")\n" ++
+    "        fail(\"SecItemAdd wrap material failed: \\(status)\", reason: reasonForStatus(status))\n" ++
     "    }\n" ++
     "}\n" ++
     "func publicKeyFromData(_ data: Data) -> SecKey {\n" ++
@@ -1526,26 +1591,28 @@ const macos_secure_enclave_helper_script =
     "        kSecAttrKeySizeInBits as String: 256,\n" ++
     "    ]\n" ++
     "    guard let key = SecKeyCreateWithData(data as CFData, attrs as CFDictionary, &error) else {\n" ++
-    "        fail(\"public key import failed: \\(secError(error))\")\n" ++
+    "        let failure = secError(error)\n" ++
+    "        fail(\"public key import failed: \\(failure.message)\", reason: failure.reason)\n" ++
     "    }\n" ++
     "    return key\n" ++
     "}\n" ++
     "func sharedSecret(privateKey: SecKey, publicKey: SecKey) -> Data {\n" ++
     "    let algorithm = SecKeyAlgorithm.ecdhKeyExchangeStandard\n" ++
     "    guard SecKeyIsAlgorithmSupported(privateKey, .keyExchange, algorithm) else {\n" ++
-    "        fail(\"ECDH key exchange is not supported for this key\")\n" ++
+    "        fail(\"ECDH key exchange is not supported for this key\", reason: \"unavailable\")\n" ++
     "    }\n" ++
     "    var error: Unmanaged<CFError>?\n" ++
     "    let params: [String: Any] = [kSecUseAuthenticationUI as String: kSecUseAuthenticationUIAllow]\n" ++
     "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params as CFDictionary, &error) as Data? else {\n" ++
-    "        fail(\"key exchange failed: \\(secError(error))\")\n" ++
+    "        let failure = secError(error)\n" ++
+    "        fail(\"key exchange failed: \\(failure.message)\", reason: failure.reason)\n" ++
     "    }\n" ++
     "    return data\n" ++
     "}\n" ++
     "func wrapKey(privateKey: SecKey, publicKey: SecKey) -> SymmetricKey {\n" ++
     "    let algorithm = SecKeyAlgorithm.ecdhKeyExchangeStandardX963SHA256\n" ++
     "    guard SecKeyIsAlgorithmSupported(privateKey, .keyExchange, algorithm) else {\n" ++
-    "        fail(\"ECDH X9.63 SHA-256 key exchange is not supported for this key\")\n" ++
+    "        fail(\"ECDH X9.63 SHA-256 key exchange is not supported for this key\", reason: \"unavailable\")\n" ++
     "    }\n" ++
     "    var error: Unmanaged<CFError>?\n" ++
     "    let params: [String: Any] = [\n" ++
@@ -1554,7 +1621,8 @@ const macos_secure_enclave_helper_script =
     "        kSecUseAuthenticationUI as String: kSecUseAuthenticationUIAllow,\n" ++
     "    ]\n" ++
     "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params as CFDictionary, &error) as Data? else {\n" ++
-    "        fail(\"wrap key derivation failed: \\(secError(error))\")\n" ++
+    "        let failure = secError(error)\n" ++
+    "        fail(\"wrap key derivation failed: \\(failure.message)\", reason: failure.reason)\n" ++
     "    }\n" ++
     "    return SymmetricKey(data: data)\n" ++
     "}\n" ++
@@ -1877,21 +1945,55 @@ fn parseSecureEnclaveWrapSecretFromJson(allocator: std.mem.Allocator, stdout: []
     };
 }
 
-fn runMacOsSecureEnclaveHelper(allocator: std.mem.Allocator, argv: []const []const u8) !WrapSecret {
-    const result = runChildWithInput(allocator, argv, macos_secure_enclave_helper_script, 16 * 1024) catch return error.WrapBackendUnavailable;
+fn parseMacOsSecureEnclaveFailureReason(reason_text: []const u8) ?MacOsSecureEnclaveFailureReason {
+    if (std.mem.eql(u8, reason_text, "user_cancelled")) return .user_cancelled;
+    if (std.mem.eql(u8, reason_text, "unavailable")) return .unavailable;
+    if (std.mem.eql(u8, reason_text, "key_missing")) return .key_missing;
+    if (std.mem.eql(u8, reason_text, "access_denied")) return .access_denied;
+    return null;
+}
+
+fn parseMacOsSecureEnclaveFailureReasonFromJson(allocator: std.mem.Allocator, stderr: []const u8) ?MacOsSecureEnclaveFailureReason {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, stderr, .{}) catch return null;
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    const reason = obj.get("reason") orelse return null;
+    if (reason != .string) return null;
+    return parseMacOsSecureEnclaveFailureReason(reason.string);
+}
+
+fn macOsSecureEnclaveDoctorFailureMessage(reason: MacOsSecureEnclaveFailureReason) []const u8 {
+    return switch (reason) {
+        .user_cancelled => "doctor: macOS Secure Enclave user-presence prompt was cancelled\n",
+        .unavailable => "doctor: macOS Secure Enclave is unavailable or unsupported on this system\n",
+        .key_missing => "doctor: macOS Secure Enclave key is missing\n",
+        .access_denied => "doctor: macOS Secure Enclave key is inaccessible (access denied)\n",
+    };
+}
+
+fn runMacOsSecureEnclaveHelperDetailed(allocator: std.mem.Allocator, argv: []const []const u8) !MacOsSecureEnclaveHelperResult {
+    const result = runChildWithInput(allocator, argv, macos_secure_enclave_helper_script, 16 * 1024) catch return .{ .failure = .unavailable };
     defer allocator.free(result.stderr);
     switch (result.term) {
         .Exited => |code| if (code != 0) {
             allocator.free(result.stdout);
-            return error.WrapBackendUnavailable;
+            return .{ .failure = parseMacOsSecureEnclaveFailureReasonFromJson(allocator, result.stderr) orelse .unavailable };
         },
         else => {
             allocator.free(result.stdout);
-            return error.WrapBackendUnavailable;
+            return .{ .failure = .unavailable };
         },
     }
     defer allocator.free(result.stdout);
-    return parseSecureEnclaveWrapSecretFromJson(allocator, result.stdout);
+    return .{ .success = try parseSecureEnclaveWrapSecretFromJson(allocator, result.stdout) };
+}
+
+fn runMacOsSecureEnclaveHelper(allocator: std.mem.Allocator, argv: []const []const u8) !WrapSecret {
+    const result = try runMacOsSecureEnclaveHelperDetailed(allocator, argv);
+    return switch (result) {
+        .success => |wrap| wrap,
+        .failure => error.WrapBackendUnavailable,
+    };
 }
 
 fn createMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, key_version: u32, require_user_presence: bool) !WrapSecret {
@@ -1957,6 +2059,71 @@ fn loadMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []cons
     }
     wrap.require_user_presence = require_user_presence;
     return wrap;
+}
+
+fn loadMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, secret_ref: []const u8, expected_key_version: u32, ephemeral_pub_b64: []const u8, require_user_presence: bool) !MacOsSecureEnclaveHelperResult {
+    const parsed = try parseMacOsSecureEnclaveSecretRef(secret_ref);
+    if (parsed.key_version != expected_key_version) return error.InvalidWrappedDek;
+
+    if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) {
+        const secret = loadSyntheticSecureEnclaveWrapSecret(allocator, parsed.tag, ephemeral_pub_b64) catch |err| switch (err) {
+            error.WrapBackendUnavailable => try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_SECRET", "secure-enclave-test-secret"),
+            else => return err,
+        };
+        return .{ .success = .{
+            .secret = secret,
+            .secret_ref = try allocator.dupe(u8, secret_ref),
+            .secure_enclave_ephemeral_pub_b64 = try allocator.dupe(u8, ephemeral_pub_b64),
+            .require_user_presence = require_user_presence,
+        } };
+    }
+    if (builtin.os.tag != .macos) return .{ .failure = .unavailable };
+
+    const result = try runMacOsSecureEnclaveHelperDetailed(allocator, &.{ macos_xcrun_tool, "swift", "-", "load", parsed.tag, ephemeral_pub_b64 });
+    return switch (result) {
+        .failure => |reason| .{ .failure = reason },
+        .success => |wrap| blk: {
+            var updated = wrap;
+            if (updated.secure_enclave_ephemeral_pub_b64 == null) {
+                updated.secure_enclave_ephemeral_pub_b64 = try allocator.dupe(u8, ephemeral_pub_b64);
+            }
+            updated.require_user_presence = require_user_presence;
+            break :blk .{ .success = updated };
+        },
+    };
+}
+
+fn unwrapMacOsSecureEnclaveDekForDoctor(allocator: std.mem.Allocator, record: WrappedDekRecord, err: *std.Io.Writer) ![]u8 {
+    const secret_ref = record.secret_ref orelse {
+        try err.writeAll("doctor: macOS Secure Enclave key reference is invalid\n");
+        std.process.exit(1);
+    };
+    _ = parseMacOsSecureEnclaveSecretRef(secret_ref) catch {
+        try err.writeAll("doctor: macOS Secure Enclave key reference is invalid\n");
+        std.process.exit(1);
+    };
+    const ephemeral_pub_b64 = record.secure_enclave_ephemeral_pub_b64 orelse {
+        try err.writeAll("doctor: macOS Secure Enclave wrapped-key metadata is invalid\n");
+        std.process.exit(1);
+    };
+
+    const result = try loadMacOsSecureEnclaveSecretDetailed(allocator, secret_ref, record.key_version, ephemeral_pub_b64, record.require_user_presence orelse false);
+    const wrap = switch (result) {
+        .success => |wrap| wrap,
+        .failure => |reason| {
+            try err.writeAll(macOsSecureEnclaveDoctorFailureMessage(reason));
+            std.process.exit(1);
+        },
+    };
+    defer freeWrapSecret(allocator, wrap);
+
+    return unwrapDekWithSecret(allocator, record, wrap.secret) catch |unwrap_err| switch (unwrap_err) {
+        error.InvalidWrappedDek => {
+            try err.writeAll("doctor: macOS Secure Enclave wrapped DEK is invalid\n");
+            std.process.exit(1);
+        },
+        else => return unwrap_err,
+    };
 }
 
 fn deleteMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []const u8) !void {
@@ -3566,6 +3733,48 @@ test "macos secure enclave secret refs are strict and versioned" {
     try std.testing.expectError(error.InvalidWrappedDek, parseMacOsSecureEnclaveSecretRef("macos-secure-enclave:tag=wrong:9"));
     try std.testing.expectError(error.InvalidWrappedDek, parseMacOsSecureEnclaveSecretRef("macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:"));
     try std.testing.expectError(error.InvalidWrappedDek, parseMacOsSecureEnclaveSecretRef("macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:9;extra=x"));
+}
+
+test "macos secure enclave helper failure reasons parse from structured JSON" {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectEqual(
+        MacOsSecureEnclaveFailureReason.user_cancelled,
+        parseMacOsSecureEnclaveFailureReasonFromJson(allocator, "{\"reason\":\"user_cancelled\",\"message\":\"cancelled\"}").?,
+    );
+    try std.testing.expectEqual(
+        MacOsSecureEnclaveFailureReason.key_missing,
+        parseMacOsSecureEnclaveFailureReasonFromJson(allocator, "{\"reason\":\"key_missing\"}").?,
+    );
+    try std.testing.expectEqual(
+        MacOsSecureEnclaveFailureReason.access_denied,
+        parseMacOsSecureEnclaveFailureReasonFromJson(allocator, "{\"reason\":\"access_denied\"}").?,
+    );
+    try std.testing.expectEqual(
+        MacOsSecureEnclaveFailureReason.unavailable,
+        parseMacOsSecureEnclaveFailureReasonFromJson(allocator, "{\"reason\":\"unavailable\"}").?,
+    );
+    try std.testing.expect(parseMacOsSecureEnclaveFailureReasonFromJson(allocator, "{\"reason\":\"mystery\"}") == null);
+    try std.testing.expect(parseMacOsSecureEnclaveFailureReasonFromJson(allocator, "not json") == null);
+}
+
+test "doctor secure enclave failure messages stay specific" {
+    try std.testing.expectEqualStrings(
+        "doctor: macOS Secure Enclave user-presence prompt was cancelled\n",
+        macOsSecureEnclaveDoctorFailureMessage(.user_cancelled),
+    );
+    try std.testing.expectEqualStrings(
+        "doctor: macOS Secure Enclave key is missing\n",
+        macOsSecureEnclaveDoctorFailureMessage(.key_missing),
+    );
+    try std.testing.expectEqualStrings(
+        "doctor: macOS Secure Enclave key is inaccessible (access denied)\n",
+        macOsSecureEnclaveDoctorFailureMessage(.access_denied),
+    );
+    try std.testing.expectEqualStrings(
+        "doctor: macOS Secure Enclave is unavailable or unsupported on this system\n",
+        macOsSecureEnclaveDoctorFailureMessage(.unavailable),
+    );
 }
 
 test "platform secure store provider label matches the local OS" {

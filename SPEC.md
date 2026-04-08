@@ -374,6 +374,7 @@ When I run `ugrant doctor`
 Then it verifies the referenced Secure Enclave key is reachable
 And it verifies the active DEK can be unwrapped
 And it reports a Secure Enclave-specific failure reason if the key is missing, inaccessible, or user presence is cancelled
+And it reports when Secure Enclave is unavailable or unsupported instead of collapsing those failures into one generic bucket
 And it never prints secret values
 
 ### Scenario: status shows expiry metadata
