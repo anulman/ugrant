@@ -37,6 +37,11 @@ const gcm_tag_len = 16;
 const argon2_params = crypto.pwhash.argon2.Params.owasp_2id;
 const argon2_kdf_name = "argon2id-v19";
 const dpapi_entropy = "ugrant-dpapi-wrap-v1";
+const macos_keychain_service = "dev.ugrant.platform-secure-store";
+const macos_keychain_account_prefix = "dek:";
+const macos_keychain_secret_ref_prefix = "macos-keychain:service=";
+const macos_keychain_account_marker = ";account=";
+const macos_security_tool = "/usr/bin/security";
 const schema_version = 3;
 
 const WrappedDekRecord = struct {
@@ -124,6 +129,12 @@ const EnvVar = struct {
 
 const ServiceDefinition = service.ServiceDefinition;
 const Paths = pathing.Paths;
+
+const MacOsKeychainRef = struct {
+    service: []const u8,
+    account: []const u8,
+    key_version: u32,
+};
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -722,7 +733,7 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     const wrapped = try loadWrappedDek(allocator, paths.keys_path);
     defer freeWrappedDekRecord(allocator, wrapped);
 
-    const current_wrap_secret = try wrapSecretForBackend(allocator, wrapped.backend, "Current ugrant passphrase: ", paths.keys_path, wrapped);
+    const current_wrap_secret = try wrapSecretForBackend(allocator, wrapped.backend, "Current ugrant passphrase: ", paths.keys_path, wrapped.key_version, wrapped);
     defer freeSecret(allocator, current_wrap_secret.secret);
 
     var target_backend: []const u8 = wrapped.backend;
@@ -736,7 +747,7 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
         if (std.mem.eql(u8, target_backend, "passphrase")) {
             target_wrap = .{ .secret = try promptSecret(allocator, "New ugrant passphrase: ") };
         } else {
-            target_wrap = try wrapSecretForBackend(allocator, target_backend, "", paths.keys_path, null);
+            target_wrap = try wrapSecretForBackend(allocator, target_backend, "", paths.keys_path, wrapped.key_version + 1, null);
         }
     } else if (passphrase_env) |env_name| {
         target_backend = "passphrase";
@@ -749,7 +760,7 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     } else if (std.mem.eql(u8, wrapped.backend, "passphrase")) {
         target_wrap = .{ .secret = try promptSecret(allocator, "New ugrant passphrase: ") };
     } else {
-        target_wrap = try wrapSecretForBackend(allocator, wrapped.backend, "", paths.keys_path, null);
+        target_wrap = try wrapSecretForBackend(allocator, wrapped.backend, "", paths.keys_path, wrapped.key_version + 1, null);
     }
     defer freeSecret(allocator, target_wrap.secret);
 
@@ -850,7 +861,23 @@ fn cmdDoctor(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
     }
     const wrapped = try loadWrappedDek(allocator, paths.keys_path);
     defer freeWrappedDekRecord(allocator, wrapped);
-    const dek = try unwrapDek(allocator, wrapped);
+    const dek = unwrapDek(allocator, wrapped) catch |e| switch (e) {
+        error.InvalidWrappedDek => {
+            if (builtin.os.tag == .macos and std.mem.eql(u8, wrapped.backend, "platform-secure-store")) {
+                try err.writeAll("doctor: macOS Keychain secret reference is invalid\n");
+                std.process.exit(1);
+            }
+            return e;
+        },
+        error.WrapBackendUnavailable => {
+            if (builtin.os.tag == .macos and std.mem.eql(u8, wrapped.backend, "platform-secure-store")) {
+                try err.writeAll("doctor: macOS Keychain item missing or inaccessible\n");
+                std.process.exit(1);
+            }
+            return e;
+        },
+        else => return e,
+    };
     defer allocator.free(dek);
     const db = try openDb(paths.db_path);
     defer _ = c.sqlite3_close(db);
@@ -929,7 +956,7 @@ fn initOrLoadKeys(allocator: std.mem.Allocator, keys_path: []const u8, requested
     if (try fileExists(keys_path)) return loadWrappedDek(allocator, keys_path);
 
     const backend = try chooseInitBackend(allocator, requested_backend, allow_insecure);
-    const wrap_secret = try wrapSecretForBackend(allocator, backend, "Create passphrase for ugrant: ", keys_path, null);
+    const wrap_secret = try wrapSecretForBackend(allocator, backend, "Create passphrase for ugrant: ", keys_path, 1, null);
     defer freeSecret(allocator, wrap_secret.secret);
 
     var dek: [dek_len]u8 = undefined;
@@ -980,16 +1007,16 @@ fn wrapDekForBackend(allocator: std.mem.Allocator, backend: []const u8, key_vers
 }
 
 fn unwrapDek(allocator: std.mem.Allocator, record: WrappedDekRecord) ![]u8 {
-    const passphrase = try wrapSecretForBackend(allocator, record.backend, "Unlock ugrant passphrase: ", null, record);
+    const passphrase = try wrapSecretForBackend(allocator, record.backend, "Unlock ugrant passphrase: ", null, record.key_version, record);
     defer freeSecret(allocator, passphrase.secret);
 
     return unwrapDekWithSecret(allocator, record, passphrase.secret);
 }
 
-fn wrapSecretForBackend(allocator: std.mem.Allocator, backend: []const u8, prompt: []const u8, keys_path: ?[]const u8, record: ?WrappedDekRecord) !WrapSecret {
+fn wrapSecretForBackend(allocator: std.mem.Allocator, backend: []const u8, prompt: []const u8, keys_path: ?[]const u8, key_version: ?u32, record: ?WrappedDekRecord) !WrapSecret {
     if (std.mem.eql(u8, backend, "insecure-keyfile")) return .{ .secret = try allocator.dupe(u8, "insecure-local-keyfile") };
     if (std.mem.eql(u8, backend, "passphrase")) return .{ .secret = try promptSecret(allocator, prompt) };
-    if (std.mem.eql(u8, backend, "platform-secure-store")) return platformStoreWrapSecret(allocator, keys_path, record);
+    if (std.mem.eql(u8, backend, "platform-secure-store")) return platformStoreWrapSecret(allocator, keys_path, key_version, record);
     if (std.mem.eql(u8, backend, "tpm2")) return tpm2WrapSecret(allocator, record);
     return error.UnsupportedWrapBackend;
 }
@@ -1139,7 +1166,86 @@ fn unprotectDpapiBytes(allocator: std.mem.Allocator, protected: []const u8) ![]u
     return allocator.dupe(u8, plaintext_slice);
 }
 
-fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8, record: ?WrappedDekRecord) !WrapSecret {
+fn formatMacOsKeychainAccount(allocator: std.mem.Allocator, key_version: u32) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}{}", .{ macos_keychain_account_prefix, key_version });
+}
+
+fn formatMacOsKeychainLabel(allocator: std.mem.Allocator, key_version: u32) ![]u8 {
+    return std.fmt.allocPrint(allocator, "ugrant DEK wrap secret ({})", .{key_version});
+}
+
+fn formatMacOsKeychainSecretRef(allocator: std.mem.Allocator, key_version: u32) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}{s}{s}{s}{}", .{ macos_keychain_secret_ref_prefix, macos_keychain_service, macos_keychain_account_marker, macos_keychain_account_prefix, key_version });
+}
+
+fn parseMacOsKeychainSecretRef(secret_ref: []const u8) !MacOsKeychainRef {
+    if (!std.mem.startsWith(u8, secret_ref, macos_keychain_secret_ref_prefix)) return error.InvalidWrappedDek;
+
+    const rest = secret_ref[macos_keychain_secret_ref_prefix.len..];
+    const marker_index = std.mem.indexOf(u8, rest, macos_keychain_account_marker) orelse return error.InvalidWrappedDek;
+    const service_name = rest[0..marker_index];
+    if (!std.mem.eql(u8, service_name, macos_keychain_service)) return error.InvalidWrappedDek;
+
+    const account = rest[marker_index + macos_keychain_account_marker.len ..];
+    if (!std.mem.startsWith(u8, account, macos_keychain_account_prefix)) return error.InvalidWrappedDek;
+    if (std.mem.indexOfScalar(u8, account, ';') != null) return error.InvalidWrappedDek;
+
+    const key_version_text = account[macos_keychain_account_prefix.len..];
+    if (key_version_text.len == 0) return error.InvalidWrappedDek;
+    const key_version = std.fmt.parseUnsigned(u32, key_version_text, 10) catch return error.InvalidWrappedDek;
+    return .{ .service = service_name, .account = account, .key_version = key_version };
+}
+
+fn loadMacOsKeychainSecret(allocator: std.mem.Allocator, secret_ref: []const u8, expected_key_version: u32) !WrapSecret {
+    const parsed = try parseMacOsKeychainSecretRef(secret_ref);
+    if (parsed.key_version != expected_key_version) return error.InvalidWrappedDek;
+
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ macos_security_tool, "find-generic-password", "-a", parsed.account, "-s", parsed.service, "-w" },
+        .max_output_bytes = 4096,
+    });
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .Exited => |code| if (code != 0) return error.WrapBackendUnavailable,
+        else => return error.WrapBackendUnavailable,
+    }
+    const trimmed = std.mem.trim(u8, result.stdout, "\r\n\t ");
+    if (trimmed.len == 0) {
+        allocator.free(result.stdout);
+        return error.WrapBackendUnavailable;
+    }
+    const secret = try allocator.dupe(u8, trimmed);
+    allocator.free(result.stdout);
+    return .{ .secret = secret, .secret_ref = try allocator.dupe(u8, secret_ref) };
+}
+
+fn storeMacOsKeychainSecret(allocator: std.mem.Allocator, key_version: u32) !WrapSecret {
+    const secret = try randomUrlSafe(allocator, 32);
+    errdefer freeSecret(allocator, secret);
+
+    const account = try formatMacOsKeychainAccount(allocator, key_version);
+    defer allocator.free(account);
+    const label = try formatMacOsKeychainLabel(allocator, key_version);
+    defer allocator.free(label);
+    const secret_ref = try formatMacOsKeychainSecretRef(allocator, key_version);
+    errdefer allocator.free(secret_ref);
+
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ macos_security_tool, "add-generic-password", "-a", account, "-s", macos_keychain_service, "-l", label, "-U", "-w", secret },
+        .max_output_bytes = 4096,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .Exited => |code| if (code != 0) return error.WrapBackendUnavailable,
+        else => return error.WrapBackendUnavailable,
+    }
+    return .{ .secret = secret, .secret_ref = secret_ref };
+}
+
+fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8, key_version: ?u32, record: ?WrappedDekRecord) !WrapSecret {
     if (record) |existing| {
         const secret_ref = existing.secret_ref orelse return error.InvalidWrappedDek;
         if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return .{ .secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_PLATFORM_STORE_SECRET", "platform-store-test-secret"), .secret_ref = try allocator.dupe(u8, secret_ref) };
@@ -1148,6 +1254,7 @@ fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8,
             defer allocator.free(protected);
             return .{ .secret = try unprotectDpapiBytes(allocator, protected), .secret_ref = try allocator.dupe(u8, secret_ref) };
         }
+        if (builtin.os.tag == .macos) return loadMacOsKeychainSecret(allocator, secret_ref, existing.key_version);
         const result = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "secret-tool", "lookup", "service", "ugrant", "secret_ref", secret_ref }, .max_output_bytes = 4096 });
         defer allocator.free(result.stderr);
         switch (result.term) {
@@ -1158,16 +1265,23 @@ fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8,
         allocator.free(result.stdout);
         return .{ .secret = secret, .secret_ref = try allocator.dupe(u8, secret_ref) };
     }
-    const ref = try randomUrlSafe(allocator, 18);
-    if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return .{ .secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_PLATFORM_STORE_SECRET", "platform-store-test-secret"), .secret_ref = ref };
+    if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) {
+        const secret_ref = if (builtin.os.tag == .macos)
+            try formatMacOsKeychainSecretRef(allocator, key_version orelse return error.InvalidArgs)
+        else
+            try randomUrlSafe(allocator, 18);
+        return .{ .secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_PLATFORM_STORE_SECRET", "platform-store-test-secret"), .secret_ref = secret_ref };
+    }
     if (builtin.os.tag == .windows) {
         const secret = try randomUrlSafe(allocator, 32);
         errdefer freeSecret(allocator, secret);
         const protected = try protectDpapiBytes(allocator, secret);
         defer allocator.free(protected);
-        allocator.free(ref);
         return .{ .secret = secret, .secret_ref = try b64EncodeAlloc(allocator, protected) };
     }
+    if (builtin.os.tag == .macos) return storeMacOsKeychainSecret(allocator, key_version orelse return error.InvalidArgs);
+
+    const ref = try randomUrlSafe(allocator, 18);
     const secret = try randomUrlSafe(allocator, 32);
     errdefer freeSecret(allocator, secret);
     const key_path = keys_path orelse return error.InvalidArgs;
@@ -2540,7 +2654,7 @@ test "windows platform secure store round trips via DPAPI" {
     const keys_path = try std.fs.path.join(allocator, &.{ base, "keys.json" });
     defer allocator.free(keys_path);
 
-    const created = try platformStoreWrapSecret(allocator, keys_path, null);
+    const created = try platformStoreWrapSecret(allocator, keys_path, 1, null);
     defer freeWrapSecret(allocator, created);
     try std.testing.expect(created.secret_ref != null);
 
@@ -2556,10 +2670,27 @@ test "windows platform secure store round trips via DPAPI" {
     };
     defer freeWrappedDekRecord(allocator, record);
 
-    const loaded = try platformStoreWrapSecret(allocator, null, record);
+    const loaded = try platformStoreWrapSecret(allocator, null, record.key_version, record);
     defer freeWrapSecret(allocator, loaded);
     try std.testing.expectEqualStrings(created.secret, loaded.secret);
     try std.testing.expectEqualStrings(created.secret_ref.?, loaded.secret_ref.?);
+}
+
+test "macos keychain secret refs are strict and versioned" {
+    const allocator = std.testing.allocator;
+
+    const secret_ref = try formatMacOsKeychainSecretRef(allocator, 7);
+    defer allocator.free(secret_ref);
+
+    const parsed = try parseMacOsKeychainSecretRef(secret_ref);
+    try std.testing.expectEqualStrings(macos_keychain_service, parsed.service);
+    try std.testing.expectEqualStrings("dek:7", parsed.account);
+    try std.testing.expectEqual(@as(u32, 7), parsed.key_version);
+
+    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=wrong;account=dek:7"));
+    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-store;account=wrong:7"));
+    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:"));
+    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:7;extra=x"));
 }
 
 test "legacy wrapped dek records remain readable" {
