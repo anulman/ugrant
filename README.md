@@ -93,6 +93,7 @@ Both installers prefer minisign verification when `minisign` is available. If no
 ## Windows notes
 
 - `install.ps1` installs `ugrant.exe` to `%LOCALAPPDATA%\Programs\ugrant\bin` and updates your user PATH.
+- PATH updates only affect new shells, so open a fresh PowerShell window before running `ugrant`. If you want to keep the current window, run `& "$env:LOCALAPPDATA\Programs\ugrant\bin\ugrant.exe" ...` directly.
 - Config lives at `%USERPROFILE%\.config\ugrant\config.toml`. State lives at `%USERPROFILE%\.local\state\ugrant\` with `state.db` and wrapped key material.
 - `ugrant init` on Windows prefers the `platform-secure-store` backend, which uses the native Windows secure store.
 - Command usage is otherwise the same: run `ugrant init`, `ugrant profile add ...`, `ugrant login --profile <name>`, then `ugrant exec --profile <name> -- <command>`.
@@ -105,6 +106,12 @@ Run a downstream command from PowerShell the same way you would elsewhere:
 
 ```powershell
 ugrant exec --profile gmail -- python .\sync_mail.py
+```
+
+If you just ran the installer and have not opened a new shell yet:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\ugrant\bin\ugrant.exe" status
 ```
 
 If you want to consume runtime env in PowerShell itself, prefer JSON output over POSIX-style exports:
