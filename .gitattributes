@@ -1,0 +1,4 @@
+*.zig text eol=lf
+build.zig text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

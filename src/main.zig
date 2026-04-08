@@ -1,7 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const crypto = std.crypto;
+const argx = @import("args.zig");
 const cli = @import("cli.zig");
+const env_output = @import("env_output.zig");
 const pathing = @import("paths.zig");
 const service = @import("service.zig");
 const c = @cImport({
@@ -278,17 +280,12 @@ fn cmdInit(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--allow-insecure-keyfile") or std.mem.eql(u8, arg, "--insecure-keyfile")) allow_insecure = true else if (std.mem.eql(u8, arg, "--backend")) {
-            i += 1;
-            if (i >= args.len) {
-                try err.writeAll(init_usage);
-                std.process.exit(2);
-            }
-            requested_backend = args[i];
+            requested_backend = try argx.nextValueOrUsage(args, &i, init_usage, err);
         } else if (std.mem.eql(u8, arg, "--secure-enclave")) {
             wrap_options.secure_enclave = true;
         } else if (std.mem.eql(u8, arg, "--require-user-presence")) {
             wrap_options.require_user_presence = true;
-        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+        } else if (argx.isHelpArg(arg)) {
             try out.writeAll(init_usage);
             return;
         } else {
@@ -382,53 +379,38 @@ fn cmdProfile(allocator: std.mem.Allocator, args: []const []const u8, out: *std.
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--name")) {
-            i += 1;
-            name = args[i];
+            name = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--service")) {
-            i += 1;
-            service_name = args[i];
+            service_name = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--discover")) {
-            i += 1;
-            discover_url = args[i];
+            discover_url = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--provider")) {
-            i += 1;
-            provider = args[i];
+            provider = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--auth-url")) {
-            i += 1;
-            auth_url = args[i];
+            auth_url = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--token-url")) {
-            i += 1;
-            token_url = args[i];
+            token_url = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--client-id")) {
-            i += 1;
-            client_id = args[i];
+            client_id = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--scope")) {
-            i += 1;
-            scope = args[i];
+            scope = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--redirect-uri")) {
-            i += 1;
-            redirect_uri = args[i];
+            redirect_uri = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--env-kind")) {
-            i += 1;
-            env_kind = args[i];
+            env_kind = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--base-url")) {
-            i += 1;
-            base_url = args[i];
+            base_url = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--model")) {
-            i += 1;
-            model = args[i];
+            model = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--audience")) {
-            i += 1;
-            audience = args[i];
+            audience = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--client-secret")) {
-            i += 1;
-            client_secret = args[i];
-        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            client_secret = try argx.nextValueOrUsage(args, &i, profile_usage_text, err);
+        } else if (argx.isHelpArg(arg)) {
             try out.writeAll("usage: ugrant profile add --name <name> [--service <preset> | --discover <issuer-or-url>] [--provider <provider>] [--auth-url <url>] [--token-url <url>] --client-id <id> [--scope <scope>] [--env-kind <kind>] [--redirect-uri <uri>] [--base-url <url>] [--model <model>] [--audience <aud>] [--client-secret <secret>]\n");
             return;
         } else {
-            try err.print("unknown option: {s}\n", .{arg});
-            std.process.exit(2);
+            try argx.writeUnknownOptionAndExit(err, arg);
         }
     }
 
@@ -530,22 +512,18 @@ fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--profile")) {
-            i += 1;
-            profile_name = args[i];
+            profile_name = try argx.nextValueOrUsage(args, &i, login_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--code")) {
-            i += 1;
-            code_override = args[i];
+            code_override = try argx.nextValueOrUsage(args, &i, login_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--redirect-url")) {
-            i += 1;
-            redirect_override = args[i];
+            redirect_override = try argx.nextValueOrUsage(args, &i, login_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--unsafe-bare-code")) {
             allow_unsafe_bare_code = true;
-        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+        } else if (argx.isHelpArg(arg)) {
             try out.writeAll(login_usage_text);
             return;
         } else if (std.mem.eql(u8, arg, "--no-open")) no_open = true else {
-            try err.print("unknown option: {s}\n", .{arg});
-            std.process.exit(2);
+            try argx.writeUnknownOptionAndExit(err, arg);
         }
     }
     if (profile_name == null) {
@@ -661,22 +639,23 @@ fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
 
 fn cmdEnv(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.Writer, err: *std.Io.Writer) !void {
     var profile_name: ?[]const u8 = null;
-    var format: []const u8 = "shell";
+    var format: env_output.Format = .shell;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--profile")) {
-            i += 1;
-            profile_name = args[i];
+            profile_name = try argx.nextValueOrUsage(args, &i, env_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--format")) {
-            i += 1;
-            format = args[i];
-        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            const raw = try argx.nextValueOrUsage(args, &i, env_usage_text, err);
+            format = env_output.parseFormat(raw) catch {
+                std.debug.print("ugrant env: unsupported format {s}\n{s}", .{ raw, env_usage_text });
+                std.process.exit(2);
+            };
+        } else if (argx.isHelpArg(arg)) {
             try out.writeAll(env_usage_text);
             return;
         } else {
-            try err.print("unknown option: {s}\n", .{arg});
-            std.process.exit(2);
+            try argx.writeUnknownOptionAndExit(err, arg);
         }
     }
     if (profile_name == null) {
@@ -687,15 +666,7 @@ fn cmdEnv(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.W
     const envs = try resolveEnvOrExit(allocator, profile_name.?, "env", err);
     defer freeEnvVars(allocator, envs);
 
-    if (std.mem.eql(u8, format, "json")) {
-        try writeEnvJson(out, envs);
-    } else {
-        for (envs) |ev| {
-            const escaped = try shellEscape(allocator, ev.value);
-            defer allocator.free(escaped);
-            try out.print("export {s}={s}\n", .{ ev.key, escaped });
-        }
-    }
+    try env_output.write(out, allocator, envs, format);
 }
 
 fn cmdExec(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.Writer, err: *std.Io.Writer) !void {
@@ -705,17 +676,15 @@ fn cmdExec(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--profile")) {
-            i += 1;
-            profile_name = args[i];
+            profile_name = try argx.nextValueOrUsage(args, &i, exec_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--")) {
             cmd_index = i + 1;
             break;
-        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+        } else if (argx.isHelpArg(arg)) {
             try out.writeAll(exec_usage_text);
             return;
         } else {
-            try err.print("unknown option: {s}\n", .{arg});
-            std.process.exit(2);
+            try argx.writeUnknownOptionAndExit(err, arg);
         }
     }
     if (profile_name == null or cmd_index == null or cmd_index.? >= args.len) {
@@ -749,14 +718,12 @@ fn cmdRevoke(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--profile")) {
-            i += 1;
-            profile_name = args[i];
-        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            profile_name = try argx.nextValueOrUsage(args, &i, revoke_usage_text, err);
+        } else if (argx.isHelpArg(arg)) {
             try out.writeAll(revoke_usage_text);
             return;
         } else {
-            try err.print("unknown option: {s}\n", .{arg});
-            std.process.exit(2);
+            try argx.writeUnknownOptionAndExit(err, arg);
         }
     }
     if (profile_name == null) {
@@ -792,33 +759,18 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--passphrase-env")) {
-            i += 1;
-            if (i >= args.len) {
-                try err.writeAll(rekey_usage_text);
-                std.process.exit(2);
-            }
-            passphrase_env = args[i];
+            passphrase_env = try argx.nextValueOrUsage(args, &i, rekey_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--passphrase-file")) {
-            i += 1;
-            if (i >= args.len) {
-                try err.writeAll(rekey_usage_text);
-                std.process.exit(2);
-            }
-            passphrase_file = args[i];
+            passphrase_file = try argx.nextValueOrUsage(args, &i, rekey_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--allow-insecure-keyfile")) {
             allow_insecure = true;
         } else if (std.mem.eql(u8, arg, "--backend")) {
-            i += 1;
-            if (i >= args.len) {
-                try err.writeAll(rekey_usage_text);
-                std.process.exit(2);
-            }
-            backend_override = args[i];
+            backend_override = try argx.nextValueOrUsage(args, &i, rekey_usage_text, err);
         } else if (std.mem.eql(u8, arg, "--secure-enclave")) {
             wrap_options.secure_enclave = true;
         } else if (std.mem.eql(u8, arg, "--require-user-presence")) {
             wrap_options.require_user_presence = true;
-        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+        } else if (argx.isHelpArg(arg)) {
             try out.writeAll(rekey_usage_text);
             return;
         } else {
@@ -956,14 +908,12 @@ fn cmdStatus(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--profile")) {
-            i += 1;
-            profile_name = args[i];
-        } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
-            try err.writeAll("usage: ugrant status [--profile <name>]\n");
-            std.process.exit(2);
+            profile_name = try argx.nextValueOrUsage(args, &i, status_usage_text, err);
+        } else if (argx.isHelpArg(args[i])) {
+            try out.writeAll(status_usage_text);
+            return;
         } else {
-            try err.print("unknown option: {s}\n", .{args[i]});
-            std.process.exit(2);
+            try argx.writeUnknownOptionAndExit(err, args[i]);
         }
     }
 
@@ -1000,7 +950,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
 
 fn cmdDoctor(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.Writer, err: *std.Io.Writer) !void {
     if (args.len > 0) {
-        if (std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h")) {
+        if (argx.isHelpArg(args[0])) {
             try out.writeAll(doctor_usage_text);
             return;
         }
@@ -3377,26 +3327,6 @@ fn freeEnvVars(allocator: std.mem.Allocator, envs: []EnvVar) void {
         allocator.free(ev.value);
     }
     allocator.free(envs);
-}
-
-fn writeEnvJson(out: *std.Io.Writer, envs: []EnvVar) !void {
-    try out.writeAll("{");
-    for (envs, 0..) |ev, idx| {
-        if (idx != 0) try out.writeAll(",");
-        try out.print("\"{s}\":\"{s}\"", .{ ev.key, ev.value });
-    }
-    try out.writeAll("}\n");
-}
-
-fn shellEscape(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
-    var out = std.ArrayList(u8){};
-    defer out.deinit(allocator);
-    try out.append(allocator, '\'');
-    for (value) |ch| {
-        if (ch == '\'') try out.appendSlice(allocator, "'\\''") else try out.append(allocator, ch);
-    }
-    try out.append(allocator, '\'');
-    return out.toOwnedSlice(allocator);
 }
 
 fn loadGrant(allocator: std.mem.Allocator, db: *c.sqlite3, profile_name: []const u8, dek: []const u8) !GrantRecord {

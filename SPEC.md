@@ -257,15 +257,15 @@ When I run `ugrant exec --profile watcher -- bun daemon.ts`
 Then the child receives `OPENAI_API_KEY`
 And the child receives `OPENAI_BASE_URL` when configured
 And the child receives `LLM_PROVIDER` and `LLM_MODEL` when configured
-And the child does not receive the refresh token
-And the child does not receive the DEK
+And the env vars added by `ugrant` do not include the refresh token
+And the env vars added by `ugrant` do not include the DEK
 
 ### Scenario: env prints normalized shell exports
 Given a profile resolves to a valid Anthropic token
 When I run `ugrant env --profile watcher`
 Then it prints shell-safe exports
 And those exports include `ANTHROPIC_API_KEY`
-And they exclude refresh-token material
+And those exports exclude refresh-token material
 
 ### Scenario: subcommand help is explicit and consistent
 When I run `ugrant profile --help`
@@ -284,17 +284,17 @@ And `ugrant init --help` and `ugrant rekey --help` document `--require-user-pres
 ### Scenario: json output supports automation
 Given a profile resolves successfully
 When I run `ugrant env --profile watcher --format json`
-Then it prints JSON to stdout
-And the JSON contains only child-safe runtime env values
+Then it prints valid JSON to stdout
+And the JSON contains only the runtime env values emitted by `ugrant`
 
 ### Scenario: env and exec refresh a stale access token on use
 Given a profile has a stored refresh token
 And the cached access token is stale
 When I run `ugrant env --profile watcher`
 Or I run `ugrant exec --profile watcher -- <cmd>`
-Then `ugrant` refreshes the access token before returning child-safe env
+Then `ugrant` refreshes the access token before returning runtime env values
 And it persists any rotated refresh token atomically
-And the child still never receives refresh-token material
+And the env vars added by `ugrant` still never include refresh-token material
 
 ## Singleton refresh expectations
 
