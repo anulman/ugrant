@@ -97,6 +97,10 @@ Both installers prefer minisign verification when `minisign` is available. If no
 - When that backend is active, `ugrant status` and `ugrant doctor` print `backend_provider: macOS Keychain`.
 - The wrapped DEK is stored as a login-keychain generic-password item with service `dev.ugrant.platform-secure-store` and account `dek:<key_version>`.
 - Existing passphrase or insecure installs are not silently migrated into Keychain. Move them explicitly with `ugrant rekey --backend platform-secure-store`.
+- Secure Enclave mode is a separate macOS opt-in. Use `ugrant init --secure-enclave` or `ugrant rekey --secure-enclave`, and add `--require-user-presence` only when you want local approval on unwrap.
+- In Secure Enclave mode, the public backend still stays `platform-secure-store`, while `ugrant status` and `ugrant doctor` should report `backend_provider: macOS Secure Enclave`. Plain login Keychain remains the default path when `--secure-enclave` is not set.
+- Secure Enclave mode is not yet treated as broadly release-ready. Real-device validation, especially on Apple Silicon, is still a release gate before wider rollout.
+- Current limitation: `ugrant doctor` can report that a Secure Enclave key is missing, unsupported, or inaccessible, but it does not yet distinguish a user-presence cancellation from other Secure Enclave access failures.
 - Live Keychain validation still needs a real Mac. After rekey, confirm `status` and `doctor` look right, then inspect the login keychain with Keychain Access or `security find-generic-password -s dev.ugrant.platform-secure-store ~/Library/Keychains/login.keychain-db`.
 
 ## Windows notes
@@ -192,6 +196,15 @@ For manual installer QA against the public install endpoints, use:
 - `pwsh -File .\scripts\manual-installer-qa-windows.ps1`
 
 Those installer scripts exercise fresh install, reinstall, repair-after-clobber, and basic post-install command checks in an isolated temp home/profile. On a real Mac, the Unix installer QA script also walks the explicit `rekey --backend platform-secure-store` path so you can verify `backend_provider: macOS Keychain` and the expected login-keychain item.
+
+For Secure Enclave mode, keep the manual gate on a real Mac separate from the Linux-host smoke scripts:
+
+1. Run `bash scripts/manual-installer-qa-unix.sh` on a real Mac, preferably Apple Silicon first.
+2. From that fresh install, run `ugrant rekey --secure-enclave`, then confirm `ugrant status` / `ugrant doctor` report `backend: platform-secure-store` and `backend_provider: macOS Secure Enclave`.
+3. If you intend to support local approval prompts, also run `ugrant rekey --secure-enclave --require-user-presence`, confirm `user_presence_required: yes`, and record both an approved access and a cancelled prompt. Today, a cancelled prompt is still expected to surface as a generic Secure Enclave access failure in `doctor`.
+4. Rekey back with `ugrant rekey --backend platform-secure-store` and confirm the install returns to plain `backend_provider: macOS Keychain`.
+
+Release-readiness for any broader rollout should mean at least one recorded Apple Silicon pass for that Keychain -> Secure Enclave -> Keychain round-trip, plus docs that still describe Secure Enclave as explicit opt-in rather than the default macOS path.
 
 ## Project files
 
