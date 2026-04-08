@@ -2244,13 +2244,23 @@ fn freeGrantSecretRewrites(allocator: std.mem.Allocator, rewrites: []GrantSecret
 
 fn openDb(path: []const u8) !*c.sqlite3 {
     var db: ?*c.sqlite3 = null;
-    if (c.sqlite3_open(path.ptr, &db) != c.SQLITE_OK) return error.SqliteOpen;
+    const sqlite_path = if (builtin.os.tag == .windows) try sqlitePathForWindows(std.heap.page_allocator, path) else path;
+    defer if (builtin.os.tag == .windows) std.heap.page_allocator.free(sqlite_path);
+    if (c.sqlite3_open(sqlite_path.ptr, &db) != c.SQLITE_OK) return error.SqliteOpen;
     if (builtin.os.tag != .windows) {
         var file = try std.fs.openFileAbsolute(path, .{});
         defer file.close();
         try file.chmod(pathing.secret_file_mode);
     }
     return db.?;
+}
+
+fn sqlitePathForWindows(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const out = try allocator.dupe(u8, path);
+    for (out) |*ch| {
+        if (ch.* == '\\') ch.* = '/';
+    }
+    return out;
 }
 
 fn ensureSchema(db: *c.sqlite3) !void {
