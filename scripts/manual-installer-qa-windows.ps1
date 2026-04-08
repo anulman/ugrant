@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ugrant-manual-qa-" + [guid]::NewGuid().ToString("N"))
 $homeDir = Join-Path $tmpRoot "home"
+$appData = Join-Path $homeDir "AppData\Roaming"
 $localAppData = Join-Path $homeDir "AppData\Local"
 $bin = Join-Path $localAppData "Programs\ugrant\bin\ugrant.exe"
 
@@ -12,12 +13,14 @@ function Step {
 
 try {
   New-Item -ItemType Directory -Path $homeDir -Force | Out-Null
+  New-Item -ItemType Directory -Path $appData -Force | Out-Null
   New-Item -ItemType Directory -Path $localAppData -Force | Out-Null
   [Environment]::SetEnvironmentVariable('HOME', $null, 'Process')
   $env:USERPROFILE = $homeDir
+  $env:APPDATA = $appData
   $env:LOCALAPPDATA = $localAppData
 
-  Step "Fresh install into isolated USERPROFILE/LOCALAPPDATA"
+  Step "Fresh install into isolated USERPROFILE/AppData"
   Invoke-RestMethod https://www.ugrant.sh/install.ps1 | Invoke-Expression
   & $bin status
 
@@ -45,6 +48,7 @@ Manual checks to record:
 - Did install succeed in the isolated temp profile?
 - In the same window, could you run the full installed path immediately?
 - After opening a fresh PowerShell window, did bare `ugrant` resolve on PATH?
+- Did `ugrant status` / `ugrant doctor` point config at `%APPDATA%\ugrant\config.toml` and state at `%LOCALAPPDATA%\ugrant\state\`?
 - Did reinstall overwrite the existing binary cleanly?
 - Did the repair step replace a broken binary with a working one?
 "@ | Write-Host

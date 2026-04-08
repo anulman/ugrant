@@ -94,7 +94,8 @@ Both installers prefer minisign verification when `minisign` is available. If no
 
 - `install.ps1` installs the matching Windows build, including native ARM64 releases, to `%LOCALAPPDATA%\Programs\ugrant\bin` and updates your user PATH.
 - PATH updates only affect new shells, so open a fresh PowerShell window before running `ugrant`. If you want to keep the current window, run `& "$env:LOCALAPPDATA\Programs\ugrant\bin\ugrant.exe" ...` directly.
-- Config lives at `%USERPROFILE%\.config\ugrant\config.toml`. State lives at `%USERPROFILE%\.local\state\ugrant\` with `state.db` and wrapped key material.
+- Config lives at `%APPDATA%\ugrant\config.toml`. State lives at `%LOCALAPPDATA%\ugrant\state\` with `state.db` and wrapped key material.
+- Existing Windows installs under `%USERPROFILE%\.config\ugrant\` and `%USERPROFILE%\.local\state\ugrant\` are migrated forward automatically the first time a current build resolves its paths.
 - `ugrant init` on Windows prefers the `platform-secure-store` backend, which uses the native Windows secure store.
 - Command usage is otherwise the same: run `ugrant init`, `ugrant profile add ...`, `ugrant login --profile <name>`, then `ugrant exec --profile <name> -- <command>`.
 - The OAuth consent step is still a human checkpoint. `ugrant login` may open a browser flow or print a URL, and some providers may ask you to paste a final redirect URL back into the terminal.

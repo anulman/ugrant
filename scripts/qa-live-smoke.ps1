@@ -4,6 +4,8 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $bin = if ($env:UGRANT_BIN) { $env:UGRANT_BIN } else { Join-Path $repoRoot "zig-out/bin/ugrant.exe" }
 $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ugrant-smoke-" + [guid]::NewGuid().ToString("N"))
 $homeDir = Join-Path $tmpRoot "home"
+$appData = Join-Path $homeDir "AppData\Roaming"
+$localAppData = Join-Path $homeDir "AppData\Local"
 
 function Assert-Contains {
   param(
@@ -23,18 +25,24 @@ function Log-Step {
 
 try {
   New-Item -ItemType Directory -Path $homeDir -Force | Out-Null
+  New-Item -ItemType Directory -Path $appData -Force | Out-Null
+  New-Item -ItemType Directory -Path $localAppData -Force | Out-Null
   [Environment]::SetEnvironmentVariable('HOME', $null, 'Process')
   $env:USERPROFILE = $homeDir
+  $env:APPDATA = $appData
+  $env:LOCALAPPDATA = $localAppData
 
   Remove-Item Env:UGRANT_TEST_PLATFORM_STORE_AVAILABLE -ErrorAction SilentlyContinue
   Remove-Item Env:UGRANT_TEST_PLATFORM_STORE_SECRET -ErrorAction SilentlyContinue
 
-  Log-Step "init insecure-keyfile in isolated USERPROFILE"
+  Log-Step "init insecure-keyfile in isolated USERPROFILE/AppData"
   & $bin init --backend insecure-keyfile --allow-insecure-keyfile | Out-Null
   $statusOut = & $bin status | Out-String
   Assert-Contains $statusOut "initialized: yes"
   Assert-Contains $statusOut "backend: insecure-keyfile"
   Assert-Contains $statusOut "security_mode: degraded"
+  Assert-Contains $statusOut "config: $appData\ugrant\config.toml"
+  Assert-Contains $statusOut "state_dir: $localAppData\ugrant\state"
 
   $doctorOut = & $bin doctor | Out-String
   Assert-Contains $doctorOut "config:"

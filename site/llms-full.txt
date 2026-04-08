@@ -104,9 +104,10 @@ $envMap.PSObject.Properties | ForEach-Object {
 
 ## Windows notes
 
-- Config path: `%USERPROFILE%\.config\ugrant\config.toml`
-- State directory: `%USERPROFILE%\.local\state\ugrant\`
+- Config path: `%APPDATA%\ugrant\config.toml`
+- State directory: `%LOCALAPPDATA%\ugrant\state\`
 - State files include `state.db` and wrapped key material under the state directory.
+- Existing Windows installs under `%USERPROFILE%\.config\ugrant\` and `%USERPROFILE%\.local\state\ugrant\` are migrated forward automatically when the new AppData locations are still empty.
 - Backend selection: on Windows, `ugrant init` should prefer `platform-secure-store`. Linux-only TPM2 guidance does not apply.
 - Login flow is not fully autonomous. During `ugrant login`, the human may still need to open the URL, approve scopes, and possibly paste a final redirect URL back into the terminal.
 - Secret prompts are hidden in a normal Windows console.

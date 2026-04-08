@@ -1,8 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const config_rel_path = ".config/ugrant/config.toml";
-pub const state_rel_dir = ".local/state/ugrant";
+pub const unix_config_rel_path = ".config/ugrant/config.toml";
+pub const unix_state_rel_dir = ".local/state/ugrant";
+pub const windows_config_rel_path = "ugrant\\config.toml";
+pub const windows_state_rel_dir = "ugrant\\state";
 pub const db_filename = "state.db";
 pub const keys_filename = "keys.json";
 pub const secret_dir_mode: std.fs.File.Mode = 0o700;
@@ -37,6 +39,16 @@ pub const Paths = struct {
         allocator.free(self.state_dir);
         allocator.free(self.db_path);
         allocator.free(self.keys_path);
+    }
+};
+
+const WindowsBaseDirs = struct {
+    config_root: []const u8,
+    state_root: []const u8,
+
+    fn deinit(self: WindowsBaseDirs, allocator: std.mem.Allocator) void {
+        allocator.free(self.config_root);
+        allocator.free(self.state_root);
     }
 };
 
@@ -95,15 +107,176 @@ fn envVarExists(name: []const u8) bool {
 pub fn resolvePaths(allocator: std.mem.Allocator) !Paths {
     const home = try getHomeDir(allocator);
     defer allocator.free(home);
-    return resolvePathsFromHome(allocator, home);
+
+    if (builtin.os.tag == .windows) {
+        const appdata = try getEnvVarOwned(allocator, "APPDATA");
+        defer if (appdata) |value| allocator.free(value);
+
+        const localappdata = try getEnvVarOwned(allocator, "LOCALAPPDATA");
+        defer if (localappdata) |value| allocator.free(value);
+
+        const paths = try resolvePathsFromValues(allocator, true, home, appdata, localappdata);
+        errdefer paths.deinit(allocator);
+
+        const legacy_paths = try resolveLegacyWindowsPathsFromHome(allocator, home);
+        defer legacy_paths.deinit(allocator);
+
+        try migrateWindowsLegacyPaths(allocator, paths, legacy_paths);
+        return paths;
+    }
+
+    return resolvePathsFromValues(allocator, false, home, null, null);
 }
 
 fn resolvePathsFromHome(allocator: std.mem.Allocator, home: []const u8) !Paths {
-    const config_path = try std.fs.path.join(allocator, &.{ home, config_rel_path });
-    const state_dir = try std.fs.path.join(allocator, &.{ home, state_rel_dir });
+    return resolvePathsFromValues(allocator, builtin.os.tag == .windows, home, null, null);
+}
+
+fn resolvePathsFromValues(
+    allocator: std.mem.Allocator,
+    is_windows: bool,
+    home: []const u8,
+    appdata: ?[]const u8,
+    localappdata: ?[]const u8,
+) !Paths {
+    if (is_windows) return resolveWindowsPathsFromValues(allocator, home, appdata, localappdata);
+
+    const config_path = try std.fs.path.join(allocator, &.{ home, unix_config_rel_path });
+    const state_dir = try std.fs.path.join(allocator, &.{ home, unix_state_rel_dir });
     const db_path = try std.fs.path.join(allocator, &.{ state_dir, db_filename });
     const keys_path = try std.fs.path.join(allocator, &.{ state_dir, keys_filename });
     return .{ .config_path = config_path, .state_dir = state_dir, .db_path = db_path, .keys_path = keys_path };
+}
+
+fn resolveWindowsPathsFromValues(
+    allocator: std.mem.Allocator,
+    home: []const u8,
+    appdata: ?[]const u8,
+    localappdata: ?[]const u8,
+) !Paths {
+    const base_dirs = try resolveWindowsBaseDirsFromValues(allocator, home, appdata, localappdata);
+    defer base_dirs.deinit(allocator);
+
+    const config_path = try joinWindowsPath(allocator, &.{ base_dirs.config_root, windows_config_rel_path });
+    const state_dir = try joinWindowsPath(allocator, &.{ base_dirs.state_root, windows_state_rel_dir });
+    const db_path = try joinWindowsPath(allocator, &.{ state_dir, db_filename });
+    const keys_path = try joinWindowsPath(allocator, &.{ state_dir, keys_filename });
+    return .{ .config_path = config_path, .state_dir = state_dir, .db_path = db_path, .keys_path = keys_path };
+}
+
+fn resolveLegacyWindowsPathsFromHome(allocator: std.mem.Allocator, home: []const u8) !Paths {
+    const config_path = try std.fs.path.join(allocator, &.{ home, unix_config_rel_path });
+    const state_dir = try std.fs.path.join(allocator, &.{ home, unix_state_rel_dir });
+    const db_path = try std.fs.path.join(allocator, &.{ state_dir, db_filename });
+    const keys_path = try std.fs.path.join(allocator, &.{ state_dir, keys_filename });
+    return .{ .config_path = config_path, .state_dir = state_dir, .db_path = db_path, .keys_path = keys_path };
+}
+
+fn resolveWindowsBaseDirsFromValues(
+    allocator: std.mem.Allocator,
+    home: []const u8,
+    appdata: ?[]const u8,
+    localappdata: ?[]const u8,
+) !WindowsBaseDirs {
+    const config_root = if (appdata) |value|
+        try allocator.dupe(u8, value)
+    else
+        try joinWindowsPath(allocator, &.{ home, "AppData", "Roaming" });
+    errdefer allocator.free(config_root);
+
+    const state_root = if (localappdata) |value|
+        try allocator.dupe(u8, value)
+    else
+        try joinWindowsPath(allocator, &.{ home, "AppData", "Local" });
+
+    return .{ .config_root = config_root, .state_root = state_root };
+}
+
+fn migrateWindowsLegacyPaths(allocator: std.mem.Allocator, current: Paths, legacy: Paths) !void {
+    try migratePathIfMissing(legacy.config_path, current.config_path);
+    try migrateStateDirIfNeeded(allocator, legacy, current);
+}
+
+fn migrateStateDirIfNeeded(allocator: std.mem.Allocator, legacy: Paths, current: Paths) !void {
+    if (!std.mem.eql(u8, legacy.state_dir, current.state_dir)) {
+        const legacy_exists = try fileExists(legacy.state_dir);
+        const current_exists = try fileExists(current.state_dir);
+        if (legacy_exists and !current_exists) {
+            if (std.fs.path.dirname(current.state_dir)) |parent| try std.fs.cwd().makePath(parent);
+            try std.fs.renameAbsolute(legacy.state_dir, current.state_dir);
+            return;
+        }
+    }
+
+    try migratePathIfMissing(legacy.db_path, current.db_path);
+    try migratePathIfMissing(legacy.keys_path, current.keys_path);
+    try migrateDbSidecarsIfMissing(allocator, legacy.db_path, current.db_path);
+}
+
+fn migrateDbSidecarsIfMissing(allocator: std.mem.Allocator, legacy_db_path: []const u8, current_db_path: []const u8) !void {
+    inline for ([_][]const u8{ "-wal", "-shm", "-journal" }) |suffix| {
+        const legacy_sidecar = try std.fmt.allocPrint(allocator, "{s}{s}", .{ legacy_db_path, suffix });
+        defer allocator.free(legacy_sidecar);
+        const current_sidecar = try std.fmt.allocPrint(allocator, "{s}{s}", .{ current_db_path, suffix });
+        defer allocator.free(current_sidecar);
+        try migratePathIfMissing(legacy_sidecar, current_sidecar);
+    }
+}
+
+fn migratePathIfMissing(legacy_path: []const u8, current_path: []const u8) !void {
+    if (std.mem.eql(u8, legacy_path, current_path)) return;
+    if (try fileExists(current_path)) return;
+    if (!(try fileExists(legacy_path))) return;
+
+    if (std.fs.path.dirname(current_path)) |parent| try std.fs.cwd().makePath(parent);
+    try std.fs.renameAbsolute(legacy_path, current_path);
+}
+
+fn joinWindowsPath(allocator: std.mem.Allocator, parts: []const []const u8) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+
+    var wrote_any = false;
+    for (parts, 0..) |part, idx| {
+        if (part.len == 0) continue;
+        const trimmed = if (idx == 0) trimWindowsTrailingSeparators(part) else trimWindowsSegment(part);
+        if (trimmed.len == 0) continue;
+
+        if (!wrote_any) {
+            try out.appendSlice(allocator, trimmed);
+            wrote_any = true;
+            continue;
+        }
+
+        if (!endsWithWindowsSeparator(out.items)) try out.append(allocator, '\\');
+        try out.appendSlice(allocator, trimmed);
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn trimWindowsSegment(part: []const u8) []const u8 {
+    var start: usize = 0;
+    var end: usize = part.len;
+
+    while (start < end and isWindowsSeparator(part[start])) : (start += 1) {}
+    while (end > start and isWindowsSeparator(part[end - 1])) : (end -= 1) {}
+    return part[start..end];
+}
+
+fn trimWindowsTrailingSeparators(part: []const u8) []const u8 {
+    var end: usize = part.len;
+    while (end > 0 and isWindowsSeparator(part[end - 1])) : (end -= 1) {}
+    return part[0..end];
+}
+
+fn endsWithWindowsSeparator(path: []const u8) bool {
+    if (path.len == 0) return false;
+    return isWindowsSeparator(path[path.len - 1]);
+}
+
+fn isWindowsSeparator(ch: u8) bool {
+    return ch == '\\' or ch == '/';
 }
 
 pub fn ensureParentDirs(paths: Paths) !void {
@@ -313,14 +486,161 @@ test "windows home dir resolution prefers USERPROFILE over HOMEDRIVE and HOMEPAT
     try std.testing.expectError(error.MissingHome, resolveHomeDirFromValues(allocator, true, null, null, "D:", null));
 }
 
-test "windows path resolution builds expected defaults from a supplied home dir" {
-    if (builtin.os.tag != .windows) return;
+test "windows base dir resolution prefers AppData env vars" {
+    const allocator = std.testing.allocator;
+    const base_dirs = try resolveWindowsBaseDirsFromValues(
+        allocator,
+        "C:\\Users\\Aidan",
+        "C:\\Users\\Aidan\\AppData\\Roaming",
+        "C:\\Users\\Aidan\\AppData\\Local",
+    );
+    defer base_dirs.deinit(allocator);
 
-    const paths = try resolvePathsFromHome(std.testing.allocator, "C:\\Users\\Aidan");
+    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\AppData\\Roaming", base_dirs.config_root);
+    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\AppData\\Local", base_dirs.state_root);
+}
+
+test "windows base dir resolution falls back to home AppData paths" {
+    const allocator = std.testing.allocator;
+    const base_dirs = try resolveWindowsBaseDirsFromValues(allocator, "C:\\Users\\Aidan", null, null);
+    defer base_dirs.deinit(allocator);
+
+    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\AppData\\Roaming", base_dirs.config_root);
+    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\AppData\\Local", base_dirs.state_root);
+}
+
+test "windows path resolution builds expected defaults from a supplied home dir" {
+    const paths = try resolvePathsFromValues(std.testing.allocator, true, "C:\\Users\\Aidan", "C:\\Users\\Aidan\\AppData\\Roaming", "C:\\Users\\Aidan\\AppData\\Local");
     defer paths.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\.config\\ugrant\\config.toml", paths.config_path);
-    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\.local\\state\\ugrant", paths.state_dir);
-    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\.local\\state\\ugrant\\state.db", paths.db_path);
-    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\.local\\state\\ugrant\\keys.json", paths.keys_path);
+    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\AppData\\Roaming\\ugrant\\config.toml", paths.config_path);
+    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\AppData\\Local\\ugrant\\state", paths.state_dir);
+    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\AppData\\Local\\ugrant\\state\\state.db", paths.db_path);
+    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\AppData\\Local\\ugrant\\state\\keys.json", paths.keys_path);
+}
+
+test "windows legacy path migration moves config and state when destinations are empty" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+
+    const legacy_root = try std.fs.path.join(allocator, &.{ base, "legacy" });
+    defer allocator.free(legacy_root);
+    const current_root = try std.fs.path.join(allocator, &.{ base, "current" });
+    defer allocator.free(current_root);
+
+    const legacy = Paths{
+        .config_path = try std.fs.path.join(allocator, &.{ legacy_root, ".config", "ugrant", "config.toml" }),
+        .state_dir = try std.fs.path.join(allocator, &.{ legacy_root, ".local", "state", "ugrant" }),
+        .db_path = try std.fs.path.join(allocator, &.{ legacy_root, ".local", "state", "ugrant", db_filename }),
+        .keys_path = try std.fs.path.join(allocator, &.{ legacy_root, ".local", "state", "ugrant", keys_filename }),
+    };
+    defer legacy.deinit(allocator);
+
+    const current = Paths{
+        .config_path = try std.fs.path.join(allocator, &.{ current_root, "AppData", "Roaming", "ugrant", "config.toml" }),
+        .state_dir = try std.fs.path.join(allocator, &.{ current_root, "AppData", "Local", "ugrant", "state" }),
+        .db_path = try std.fs.path.join(allocator, &.{ current_root, "AppData", "Local", "ugrant", "state", db_filename }),
+        .keys_path = try std.fs.path.join(allocator, &.{ current_root, "AppData", "Local", "ugrant", "state", keys_filename }),
+    };
+    defer current.deinit(allocator);
+
+    if (std.fs.path.dirname(legacy.config_path)) |parent| try std.fs.cwd().makePath(parent);
+    if (std.fs.path.dirname(legacy.db_path)) |parent| try std.fs.cwd().makePath(parent);
+
+    {
+        var file = try std.fs.createFileAbsolute(legacy.config_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("legacy-config");
+    }
+    {
+        var file = try std.fs.createFileAbsolute(legacy.db_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("legacy-db");
+    }
+    {
+        var file = try std.fs.createFileAbsolute(legacy.keys_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("legacy-keys");
+    }
+
+    try migrateWindowsLegacyPaths(allocator, current, legacy);
+
+    try std.testing.expect(try fileExists(current.config_path));
+    try std.testing.expect(try fileExists(current.db_path));
+    try std.testing.expect(try fileExists(current.keys_path));
+    try std.testing.expect(!(try fileExists(legacy.config_path)));
+    try std.testing.expect(!(try fileExists(legacy.db_path)));
+    try std.testing.expect(!(try fileExists(legacy.keys_path)));
+}
+
+test "windows legacy path migration does not clobber an existing AppData install" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+
+    const legacy_root = try std.fs.path.join(allocator, &.{ base, "legacy" });
+    defer allocator.free(legacy_root);
+    const current_root = try std.fs.path.join(allocator, &.{ base, "current" });
+    defer allocator.free(current_root);
+
+    const legacy = Paths{
+        .config_path = try std.fs.path.join(allocator, &.{ legacy_root, ".config", "ugrant", "config.toml" }),
+        .state_dir = try std.fs.path.join(allocator, &.{ legacy_root, ".local", "state", "ugrant" }),
+        .db_path = try std.fs.path.join(allocator, &.{ legacy_root, ".local", "state", "ugrant", db_filename }),
+        .keys_path = try std.fs.path.join(allocator, &.{ legacy_root, ".local", "state", "ugrant", keys_filename }),
+    };
+    defer legacy.deinit(allocator);
+
+    const current = Paths{
+        .config_path = try std.fs.path.join(allocator, &.{ current_root, "AppData", "Roaming", "ugrant", "config.toml" }),
+        .state_dir = try std.fs.path.join(allocator, &.{ current_root, "AppData", "Local", "ugrant", "state" }),
+        .db_path = try std.fs.path.join(allocator, &.{ current_root, "AppData", "Local", "ugrant", "state", db_filename }),
+        .keys_path = try std.fs.path.join(allocator, &.{ current_root, "AppData", "Local", "ugrant", "state", keys_filename }),
+    };
+    defer current.deinit(allocator);
+
+    if (std.fs.path.dirname(legacy.config_path)) |parent| try std.fs.cwd().makePath(parent);
+    if (std.fs.path.dirname(legacy.db_path)) |parent| try std.fs.cwd().makePath(parent);
+    if (std.fs.path.dirname(current.config_path)) |parent| try std.fs.cwd().makePath(parent);
+    if (std.fs.path.dirname(current.db_path)) |parent| try std.fs.cwd().makePath(parent);
+
+    {
+        var file = try std.fs.createFileAbsolute(legacy.config_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("legacy-config");
+    }
+    {
+        var file = try std.fs.createFileAbsolute(current.config_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("current-config");
+    }
+    {
+        var file = try std.fs.createFileAbsolute(legacy.db_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("legacy-db");
+    }
+    {
+        var file = try std.fs.createFileAbsolute(current.db_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("current-db");
+    }
+
+    try migrateWindowsLegacyPaths(allocator, current, legacy);
+
+    const current_config = try std.fs.cwd().readFileAlloc(allocator, current.config_path, 1024);
+    defer allocator.free(current_config);
+    const current_db = try std.fs.cwd().readFileAlloc(allocator, current.db_path, 1024);
+    defer allocator.free(current_db);
+
+    try std.testing.expectEqualStrings("current-config", current_config);
+    try std.testing.expectEqualStrings("current-db", current_db);
+    try std.testing.expect(try fileExists(legacy.config_path));
+    try std.testing.expect(try fileExists(legacy.db_path));
 }

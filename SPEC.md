@@ -52,11 +52,20 @@ Recent addition:
 ### Scenario: init creates the expected storage layout
 Given `ugrant` is not yet initialized
 When I run `ugrant init`
-Then it creates `~/.config/ugrant/config.toml` if missing
-And it creates `~/.local/state/ugrant/state.db`
-And it creates `~/.local/state/ugrant/keys.json`
+Then on Linux and macOS it creates `~/.config/ugrant/config.toml` if missing
+And on Linux and macOS it creates `~/.local/state/ugrant/state.db`
+And on Linux and macOS it creates `~/.local/state/ugrant/keys.json`
+And on Windows it creates `%APPDATA%\ugrant\config.toml` if missing
+And on Windows it creates `%LOCALAPPDATA%\ugrant\state\state.db`
+And on Windows it creates `%LOCALAPPDATA%\ugrant\state\keys.json`
 And it prints which DEK wrapping backend was selected
 And it verifies that the DEK can be unwrapped
+
+### Scenario: Windows storage migrates forward from the old XDG-style layout
+Given a Windows machine has existing state under `%USERPROFILE%\.config\ugrant\` or `%USERPROFILE%\.local\state\ugrant\`
+When a current `ugrant` build resolves its paths
+Then it moves that config and state into `%APPDATA%\ugrant\` and `%LOCALAPPDATA%\ugrant\state\` when the new locations are still empty
+And it does not overwrite an existing AppData-based install
 
 ### Scenario: runtime metadata stays queryable
 Given `ugrant` has stored credentials for a profile
