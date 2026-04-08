@@ -104,9 +104,35 @@ Given I select `platform-secure-store`
 When `ugrant` resolves the requested backend
 Then on Linux it prefers TPM2 when TPM2 is available
 And otherwise on Linux it falls back to Secret Service via `secret-tool`
-And on macOS it uses the user's Keychain via a generic-password item in the default login keychain
+And on macOS it uses the user's Keychain via a generic-password item in the default login keychain by default
+And macOS Secure Enclave is not selected by `platform-secure-store` alone
+And macOS Secure Enclave requires explicit `--secure-enclave`
 And on other operating systems it uses that platform's secure store implementation
 And the persisted backend may be the concrete backend that was actually used
+And macOS Secure Enclave still persists the public backend `platform-secure-store` plus enclave-specific metadata
+
+### Scenario: Secure Enclave is an explicit macOS opt-in
+Given I am on macOS
+When I run `ugrant init --secure-enclave`
+Then `ugrant` still persists backend `platform-secure-store`
+And it uses a Secure Enclave-backed non-exportable key instead of a plain Keychain generic-password wrap secret
+And `backend_provider` reports `macOS Secure Enclave`
+And no silent fallback occurs if Secure Enclave setup fails
+
+### Scenario: user presence is only valid with Secure Enclave
+Given I am on macOS
+When I run `ugrant init --secure-enclave --require-user-presence`
+Or I run `ugrant rekey --secure-enclave --require-user-presence`
+Then the Secure Enclave key requires local user presence for unwrap
+And `status` and `doctor` report `user_presence_required: yes`
+And `--require-user-presence` is rejected unless `--secure-enclave` is also present
+
+### Scenario: explicit Secure Enclave requests fail on unsupported platforms
+Given I am not on macOS
+When I run `ugrant init --secure-enclave`
+Or I run `ugrant rekey --secure-enclave`
+Then `ugrant` exits with a clear unsupported-platform error
+And it does not silently fall back to plain `platform-secure-store`, passphrase, or insecure-keyfile mode
 
 ### Scenario: passphrase wrapping remains the portable fallback backend
 Given TPM2 and platform secure store are unavailable
@@ -154,6 +180,9 @@ Given `ugrant` already has stored credentials
 When I run `ugrant rekey --backend platform-secure-store`
 Then it resolves that public choice the same way `ugrant init` does
 And it may persist `tpm2` on Linux when TPM2 is the concrete backend used
+And on macOS it selects plain Keychain mode unless `--secure-enclave` is also present
+And `ugrant rekey --secure-enclave` moves macOS state into Secure Enclave mode
+And `ugrant rekey --backend platform-secure-store` from Secure Enclave mode moves macOS state back to plain Keychain mode
 And I can later rekey back to `platform-secure-store`, `tpm2`, `passphrase`, or explicit insecure keyfile mode
 And each rekey still rotates the DEK and re-encrypts secret-bearing fields
 
@@ -249,6 +278,8 @@ Or I run `ugrant doctor --help`
 Then `ugrant` prints a usage line for that command
 And it exits successfully without falling through to unknown-option errors
 And `ugrant rekey --help` documents `--backend` for `platform-secure-store`, `tpm2`, and `passphrase`
+And `ugrant init --help` and `ugrant rekey --help` document `--secure-enclave`
+And `ugrant init --help` and `ugrant rekey --help` document `--require-user-presence`
 
 ### Scenario: json output supports automation
 Given a profile resolves successfully
@@ -330,6 +361,20 @@ And it may name the concrete local provider, such as macOS Keychain or Secret Se
 And it shows whether security mode is normal or degraded
 And it shows that no grants currently exist
 And it does not print the DEK or token material
+
+### Scenario: status and doctor report Secure Enclave mode clearly
+Given `ugrant` is initialized on macOS with `--secure-enclave --require-user-presence`
+When I run `ugrant status`
+Then it shows `backend: platform-secure-store`
+And it shows `backend_provider: macOS Secure Enclave`
+And it shows `secure_enclave: yes`
+And it shows `user_presence_required: yes`
+And it does not print the DEK or key material
+When I run `ugrant doctor`
+Then it verifies the referenced Secure Enclave key is reachable
+And it verifies the active DEK can be unwrapped
+And it reports a Secure Enclave-specific failure reason if the key is missing, inaccessible, or user presence is cancelled
+And it never prints secret values
 
 ### Scenario: status shows expiry metadata
 Given a profile has a cached access token
