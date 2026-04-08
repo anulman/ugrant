@@ -36,12 +36,16 @@ const gcm_nonce_len = 12;
 const gcm_tag_len = 16;
 const argon2_params = crypto.pwhash.argon2.Params.owasp_2id;
 const argon2_kdf_name = "argon2id-v19";
+const hkdf_sha256_kdf_name = "hkdf-sha256";
 const dpapi_entropy = "ugrant-dpapi-wrap-v1";
 const macos_keychain_service = "dev.ugrant.platform-secure-store";
 const macos_keychain_account_prefix = "dek:";
 const macos_keychain_secret_ref_prefix = "macos-keychain:service=";
 const macos_keychain_account_marker = ";account=";
+const macos_secure_enclave_application_tag_prefix = "dev.ugrant.secure-enclave.dek:";
+const macos_secure_enclave_secret_ref_prefix = "macos-secure-enclave:tag=";
 const macos_security_tool = "/usr/bin/security";
+const macos_xcrun_tool = "/usr/bin/xcrun";
 const schema_version = 3;
 
 const WrappedDekRecord = struct {
@@ -59,6 +63,8 @@ const WrappedDekRecord = struct {
     secret_ref: ?[]const u8 = null,
     tpm2_pub_b64: ?[]const u8 = null,
     tpm2_priv_b64: ?[]const u8 = null,
+    secure_enclave_ephemeral_pub_b64: ?[]const u8 = null,
+    require_user_presence: ?bool = null,
 };
 
 const StatusSummary = struct {
@@ -68,6 +74,7 @@ const StatusSummary = struct {
     db_path: []const u8,
     keys_path: []const u8,
     backend: ?[]const u8,
+    backend_provider: ?[]const u8,
     security_mode: []const u8,
     profile_count: usize,
     grant_count: usize,
@@ -136,8 +143,22 @@ const MacOsKeychainRef = struct {
     key_version: u32,
 };
 
-fn backendProviderLabel(backend: []const u8) ?[]const u8 {
+const MacOsSecureEnclaveRef = struct {
+    tag: []const u8,
+    key_version: u32,
+};
+
+const WrapBackendOptions = struct {
+    secure_enclave: bool = false,
+    require_user_presence: bool = false,
+};
+
+fn backendProviderLabel(backend: []const u8, secret_ref: ?[]const u8) ?[]const u8 {
     if (!std.mem.eql(u8, backend, "platform-secure-store")) return null;
+
+    if (secret_ref) |ref| {
+        if (isMacOsSecureEnclaveSecretRef(ref)) return "macOS Secure Enclave";
+    }
 
     return switch (builtin.os.tag) {
         .macos => "macOS Keychain",
@@ -206,25 +227,49 @@ pub fn main() !void {
 }
 
 fn cmdInit(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.Writer, err: *std.Io.Writer) !void {
+    const init_usage = "usage: ugrant init [--backend <name>] [--allow-insecure-keyfile] [--secure-enclave [--require-user-presence]]\n";
     var requested_backend: ?[]const u8 = null;
     var allow_insecure = false;
+    var wrap_options = WrapBackendOptions{};
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--allow-insecure-keyfile") or std.mem.eql(u8, arg, "--insecure-keyfile")) allow_insecure = true else if (std.mem.eql(u8, arg, "--backend")) {
             i += 1;
             if (i >= args.len) {
-                try err.writeAll("usage: ugrant init [--backend <name>] [--allow-insecure-keyfile]\n");
+                try err.writeAll(init_usage);
                 std.process.exit(2);
             }
             requested_backend = args[i];
+        } else if (std.mem.eql(u8, arg, "--secure-enclave")) {
+            wrap_options.secure_enclave = true;
+        } else if (std.mem.eql(u8, arg, "--require-user-presence")) {
+            wrap_options.require_user_presence = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            try out.writeAll("usage: ugrant init [--backend <name>] [--allow-insecure-keyfile]\n");
+            try out.writeAll(init_usage);
             return;
         } else {
-            try err.writeAll("usage: ugrant init [--backend <name>] [--allow-insecure-keyfile]\n");
+            try err.writeAll(init_usage);
             std.process.exit(2);
         }
+    }
+
+    if (wrap_options.require_user_presence and !wrap_options.secure_enclave) {
+        try err.writeAll("ugrant init: --require-user-presence only works with --secure-enclave\n");
+        std.process.exit(2);
+    }
+    if (wrap_options.secure_enclave) {
+        if (requested_backend) |backend| {
+            if (!std.mem.eql(u8, backend, "platform-secure-store")) {
+                try err.writeAll("ugrant init: --secure-enclave only works with --backend platform-secure-store\n");
+                std.process.exit(2);
+            }
+        }
+        if (!secureEnclaveAvailable(allocator)) {
+            try err.writeAll("ugrant init: macOS Secure Enclave requested but unavailable on this system\n");
+            std.process.exit(1);
+        }
+        requested_backend = "platform-secure-store";
     }
 
     const paths = try resolvePaths(allocator);
@@ -233,7 +278,7 @@ fn cmdInit(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.
     try ensureParentDirs(paths);
     try ensureConfig(paths.config_path);
 
-    const wrapped = try initOrLoadKeys(allocator, paths.keys_path, requested_backend, allow_insecure);
+    const wrapped = try initOrLoadKeys(allocator, paths.keys_path, requested_backend, allow_insecure, wrap_options);
     defer freeWrappedDekRecord(allocator, wrapped);
 
     const dek = try unwrapDek(allocator, wrapped);
@@ -245,7 +290,7 @@ fn cmdInit(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.
     try tightenSecretStatePermissions(paths);
 
     try out.print("initialized: yes\nbackend: {s}\n", .{wrapped.backend});
-    if (backendProviderLabel(wrapped.backend)) |provider| {
+    if (backendProviderLabel(wrapped.backend, wrapped.secret_ref)) |provider| {
         try out.print("backend_provider: {s}\n", .{provider});
     }
     try out.print("keys: {s}\ndb: {s}\n", .{ paths.keys_path, paths.db_path });
@@ -699,6 +744,7 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     var passphrase_file: ?[]const u8 = null;
     var backend_override: ?[]const u8 = null;
     var allow_insecure = false;
+    var wrap_options = WrapBackendOptions{};
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -726,6 +772,10 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
                 std.process.exit(2);
             }
             backend_override = args[i];
+        } else if (std.mem.eql(u8, arg, "--secure-enclave")) {
+            wrap_options.secure_enclave = true;
+        } else if (std.mem.eql(u8, arg, "--require-user-presence")) {
+            wrap_options.require_user_presence = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             try out.writeAll(rekey_usage_text);
             return;
@@ -739,6 +789,26 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
         try err.writeAll("ugrant rekey: choose either passphrase wrap or --allow-insecure-keyfile, not both\n");
         std.process.exit(2);
     }
+    if (wrap_options.require_user_presence and !wrap_options.secure_enclave) {
+        try err.writeAll("ugrant rekey: --require-user-presence only works with --secure-enclave\n");
+        std.process.exit(2);
+    }
+    if (wrap_options.secure_enclave) {
+        if (allow_insecure or passphrase_env != null or passphrase_file != null) {
+            try err.writeAll("ugrant rekey: --secure-enclave cannot be combined with passphrase or insecure rewrap options\n");
+            std.process.exit(2);
+        }
+        if (backend_override) |backend| {
+            if (!std.mem.eql(u8, backend, "platform-secure-store")) {
+                try err.writeAll("ugrant rekey: --secure-enclave only works with --backend platform-secure-store\n");
+                std.process.exit(2);
+            }
+        }
+        if (!secureEnclaveAvailable(allocator)) {
+            try err.writeAll("ugrant rekey: macOS Secure Enclave requested but unavailable on this system\n");
+            std.process.exit(1);
+        }
+    }
 
     const paths = try resolvePaths(allocator);
     defer paths.deinit(allocator);
@@ -748,46 +818,61 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     defer freeWrappedDekRecord(allocator, wrapped);
 
     const current_wrap_secret = try wrapSecretForBackend(allocator, wrapped.backend, "Current ugrant passphrase: ", paths.keys_path, wrapped.key_version, wrapped);
-    defer freeSecret(allocator, current_wrap_secret.secret);
+    defer freeWrapSecret(allocator, current_wrap_secret);
 
     var target_backend: []const u8 = wrapped.backend;
     var target_wrap: WrapSecret = undefined;
+    var target_wrap_options = if (isMacOsSecureEnclaveRecord(wrapped)) secureEnclaveOptionsFromRecord(wrapped) else WrapBackendOptions{};
 
     if (allow_insecure) {
         target_backend = "insecure-keyfile";
         target_wrap = .{ .secret = try allocator.dupe(u8, "insecure-local-keyfile") };
+        target_wrap_options = .{};
     } else if (backend_override) |backend| {
-        target_backend = try resolveBackendChoice(backend, false, backendAvailable(allocator, "tpm2"), backendAvailable(allocator, "platform-secure-store"));
+        if (wrap_options.secure_enclave) {
+            target_backend = "platform-secure-store";
+            target_wrap_options = wrap_options;
+        } else {
+            target_backend = try resolveBackendChoice(backend, false, backendAvailable(allocator, "tpm2"), backendAvailable(allocator, "platform-secure-store"));
+            target_wrap_options = .{};
+        }
         if (std.mem.eql(u8, target_backend, "passphrase")) {
             target_wrap = .{ .secret = try promptSecret(allocator, "New ugrant passphrase: ") };
         } else {
-            target_wrap = try wrapSecretForBackend(allocator, target_backend, "", paths.keys_path, wrapped.key_version + 1, null);
+            target_wrap = try wrapSecretForBackendWithOptions(allocator, target_backend, "", paths.keys_path, wrapped.key_version + 1, null, target_wrap_options);
         }
+    } else if (wrap_options.secure_enclave) {
+        target_backend = "platform-secure-store";
+        target_wrap_options = wrap_options;
+        target_wrap = try wrapSecretForBackendWithOptions(allocator, target_backend, "", paths.keys_path, wrapped.key_version + 1, null, target_wrap_options);
     } else if (passphrase_env) |env_name| {
         target_backend = "passphrase";
+        target_wrap_options = .{};
         target_wrap = .{ .secret = try std.process.getEnvVarOwned(allocator, env_name) };
     } else if (passphrase_file) |file_path| {
         target_backend = "passphrase";
+        target_wrap_options = .{};
         const raw = try std.fs.cwd().readFileAlloc(allocator, file_path, 4096);
         defer allocator.free(raw);
         target_wrap = .{ .secret = try allocator.dupe(u8, std.mem.trim(u8, raw, "\r\n\t ")) };
     } else if (std.mem.eql(u8, wrapped.backend, "passphrase")) {
+        target_wrap_options = .{};
         target_wrap = .{ .secret = try promptSecret(allocator, "New ugrant passphrase: ") };
     } else {
-        target_wrap = try wrapSecretForBackend(allocator, wrapped.backend, "", paths.keys_path, wrapped.key_version + 1, null);
+        target_wrap = try wrapSecretForBackendWithOptions(allocator, wrapped.backend, "", paths.keys_path, wrapped.key_version + 1, null, target_wrap_options);
     }
-    defer freeSecret(allocator, target_wrap.secret);
+    defer freeWrapSecret(allocator, target_wrap);
 
     const db = try openDb(paths.db_path);
     defer _ = c.sqlite3_close(db);
-    const stats = try performRekey(allocator, db, paths.keys_path, wrapped, current_wrap_secret.secret, target_backend, target_wrap.secret, target_wrap.secret_ref, target_wrap.tpm2_pub_b64, target_wrap.tpm2_priv_b64);
+    const stats = try performRekey(allocator, db, paths.keys_path, wrapped, current_wrap_secret.secret, target_backend, target_wrap.secret, target_wrap.secret_ref, target_wrap.tpm2_pub_b64, target_wrap.tpm2_priv_b64, target_wrap.secure_enclave_ephemeral_pub_b64, target_wrap.require_user_presence);
     try tightenSecretStatePermissions(paths);
     try out.print("rekey: ok\nbackend: {s}\n", .{target_backend});
-    if (backendProviderLabel(target_backend)) |provider| {
+    if (backendProviderLabel(target_backend, target_wrap.secret_ref)) |provider| {
         try out.print("backend_provider: {s}\n", .{provider});
     }
     try out.print("previous_backend: {s}\n", .{wrapped.backend});
-    if (backendProviderLabel(wrapped.backend)) |provider| {
+    if (backendProviderLabel(wrapped.backend, wrapped.secret_ref)) |provider| {
         try out.print("previous_backend_provider: {s}\n", .{provider});
     }
     try out.print(
@@ -848,8 +933,8 @@ fn cmdStatus(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
     defer freeStatusSummary(allocator, summary);
 
     try out.print("initialized: {s}\nconfig: {s}\nstate_dir: {s}\ndb: {s}\nkeys: {s}\nbackend: {s}\n", .{ if (summary.initialized) "yes" else "no", summary.config_path, summary.state_dir, summary.db_path, summary.keys_path, summary.backend orelse "none" });
-    if (summary.backend) |backend| {
-        if (backendProviderLabel(backend)) |provider| {
+    if (summary.backend != null) {
+        if (summary.backend_provider) |provider| {
             try out.print("backend_provider: {s}\n", .{provider});
         }
     }
@@ -890,21 +975,33 @@ fn cmdDoctor(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
     const wrapped = try loadWrappedDek(allocator, paths.keys_path);
     defer freeWrappedDekRecord(allocator, wrapped);
     try out.print("backend: {s}\n", .{wrapped.backend});
-    if (backendProviderLabel(wrapped.backend)) |provider| {
+    if (backendProviderLabel(wrapped.backend, wrapped.secret_ref)) |provider| {
         try out.print("backend_provider: {s}\n", .{provider});
     }
     const dek = unwrapDek(allocator, wrapped) catch |e| switch (e) {
         error.InvalidWrappedDek => {
-            if (builtin.os.tag == .macos and std.mem.eql(u8, wrapped.backend, "platform-secure-store")) {
-                try err.writeAll("doctor: macOS Keychain secret reference is invalid\n");
-                std.process.exit(1);
+            if (std.mem.eql(u8, wrapped.backend, "platform-secure-store")) {
+                if (isMacOsSecureEnclaveRecord(wrapped)) {
+                    try err.writeAll("doctor: macOS Secure Enclave key reference is invalid\n");
+                    std.process.exit(1);
+                }
+                if (builtin.os.tag == .macos) {
+                    try err.writeAll("doctor: macOS Keychain secret reference is invalid\n");
+                    std.process.exit(1);
+                }
             }
             return e;
         },
         error.WrapBackendUnavailable => {
-            if (builtin.os.tag == .macos and std.mem.eql(u8, wrapped.backend, "platform-secure-store")) {
-                try err.writeAll("doctor: macOS Keychain item missing or inaccessible\n");
-                std.process.exit(1);
+            if (std.mem.eql(u8, wrapped.backend, "platform-secure-store")) {
+                if (isMacOsSecureEnclaveRecord(wrapped)) {
+                    try err.writeAll("doctor: macOS Secure Enclave key missing, unsupported, or inaccessible\n");
+                    std.process.exit(1);
+                }
+                if (builtin.os.tag == .macos) {
+                    try err.writeAll("doctor: macOS Keychain item missing or inaccessible\n");
+                    std.process.exit(1);
+                }
             }
             return e;
         },
@@ -965,6 +1062,10 @@ fn envTruthy(name: []const u8) bool {
     return pathing.envTruthy(name);
 }
 
+fn commandExists(allocator: std.mem.Allocator, name: []const u8) bool {
+    return pathing.commandExists(allocator, name);
+}
+
 fn getEnvOrDefaultOwned(allocator: std.mem.Allocator, name: []const u8, fallback: []const u8) ![]u8 {
     return std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => allocator.dupe(u8, fallback),
@@ -984,16 +1085,20 @@ fn chooseInitBackend(allocator: std.mem.Allocator, requested_backend: ?[]const u
     return pathing.chooseInitBackend(allocator, requested_backend, allow_insecure);
 }
 
-fn initOrLoadKeys(allocator: std.mem.Allocator, keys_path: []const u8, requested_backend: ?[]const u8, allow_insecure: bool) !WrappedDekRecord {
+fn initOrLoadKeys(allocator: std.mem.Allocator, keys_path: []const u8, requested_backend: ?[]const u8, allow_insecure: bool, options: WrapBackendOptions) !WrappedDekRecord {
     if (try fileExists(keys_path)) return loadWrappedDek(allocator, keys_path);
 
-    const backend = try chooseInitBackend(allocator, requested_backend, allow_insecure);
-    const wrap_secret = try wrapSecretForBackend(allocator, backend, "Create passphrase for ugrant: ", keys_path, 1, null);
-    defer freeSecret(allocator, wrap_secret.secret);
+    const backend = if (options.secure_enclave) blk: {
+        if (!secureEnclaveAvailable(allocator)) return error.WrapBackendUnavailable;
+        break :blk "platform-secure-store";
+    } else try chooseInitBackend(allocator, requested_backend, allow_insecure);
+    const wrap_secret = try wrapSecretForBackendWithOptions(allocator, backend, "Create passphrase for ugrant: ", keys_path, 1, null, options);
+    defer freeWrapSecret(allocator, wrap_secret);
+    errdefer cleanupPersistedWrapSecret(allocator, backend, wrap_secret) catch {};
 
     var dek: [dek_len]u8 = undefined;
     crypto.random.bytes(&dek);
-    const record = try wrapDekForBackend(allocator, backend, 1, wrap_secret.secret, &dek, wrap_secret.secret_ref, wrap_secret.tpm2_pub_b64, wrap_secret.tpm2_priv_b64);
+    const record = try wrapDekForBackend(allocator, backend, 1, wrap_secret.secret, &dek, wrap_secret);
     errdefer freeWrappedDekRecord(allocator, record);
     try saveWrappedDek(keys_path, record);
     return record;
@@ -1004,15 +1109,23 @@ const WrapSecret = struct {
     secret_ref: ?[]const u8 = null,
     tpm2_pub_b64: ?[]const u8 = null,
     tpm2_priv_b64: ?[]const u8 = null,
+    secure_enclave_ephemeral_pub_b64: ?[]const u8 = null,
+    require_user_presence: bool = false,
 };
 
-fn wrapDekForBackend(allocator: std.mem.Allocator, backend: []const u8, key_version: u32, passphrase: []const u8, dek: *const [dek_len]u8, secret_ref: ?[]const u8, tpm2_pub_b64: ?[]const u8, tpm2_priv_b64: ?[]const u8) !WrappedDekRecord {
+fn wrapDekForBackend(allocator: std.mem.Allocator, backend: []const u8, key_version: u32, passphrase: []const u8, dek: *const [dek_len]u8, wrap: WrapSecret) !WrappedDekRecord {
     var salt: [kdf_salt_len]u8 = undefined;
     var nonce: [gcm_nonce_len]u8 = undefined;
     crypto.random.bytes(&salt);
     crypto.random.bytes(&nonce);
     var key: [dek_len]u8 = undefined;
-    try deriveWrapKeyArgon2id(allocator, &key, passphrase, &salt, argon2_params);
+    const secure_enclave_mode = isMacOsSecureEnclaveSecretRefOpt(wrap.secret_ref);
+    if (secure_enclave_mode) {
+        if (wrap.secure_enclave_ephemeral_pub_b64 == null) return error.InvalidArgs;
+        deriveWrapKeyHkdfSha256(&key, passphrase, &salt);
+    } else {
+        try deriveWrapKeyArgon2id(allocator, &key, passphrase, &salt, argon2_params);
+    }
     var ct: [dek_len]u8 = undefined;
     var tag: [gcm_tag_len]u8 = undefined;
     crypto.aead.aes_gcm.Aes256Gcm.encrypt(&ct, &tag, dek, "ugrant-dek-wrap", nonce, key);
@@ -1028,13 +1141,15 @@ fn wrapDekForBackend(allocator: std.mem.Allocator, backend: []const u8, key_vers
         .nonce_b64 = try b64EncodeAlloc(allocator, &nonce),
         .ciphertext_b64 = try b64EncodeAlloc(allocator, combined),
         .created_at = try std.fmt.allocPrint(allocator, "{}", .{nowTs()}),
-        .kdf = try allocator.dupe(u8, argon2_kdf_name),
-        .kdf_t = argon2_params.t,
-        .kdf_m = argon2_params.m,
-        .kdf_p = argon2_params.p,
-        .secret_ref = if (secret_ref) |v| try allocator.dupe(u8, v) else null,
-        .tpm2_pub_b64 = if (tpm2_pub_b64) |v| try allocator.dupe(u8, v) else null,
-        .tpm2_priv_b64 = if (tpm2_priv_b64) |v| try allocator.dupe(u8, v) else null,
+        .kdf = try allocator.dupe(u8, if (secure_enclave_mode) hkdf_sha256_kdf_name else argon2_kdf_name),
+        .kdf_t = if (secure_enclave_mode) null else argon2_params.t,
+        .kdf_m = if (secure_enclave_mode) null else argon2_params.m,
+        .kdf_p = if (secure_enclave_mode) null else argon2_params.p,
+        .secret_ref = if (wrap.secret_ref) |v| try allocator.dupe(u8, v) else null,
+        .tpm2_pub_b64 = if (wrap.tpm2_pub_b64) |v| try allocator.dupe(u8, v) else null,
+        .tpm2_priv_b64 = if (wrap.tpm2_priv_b64) |v| try allocator.dupe(u8, v) else null,
+        .secure_enclave_ephemeral_pub_b64 = if (wrap.secure_enclave_ephemeral_pub_b64) |v| try allocator.dupe(u8, v) else null,
+        .require_user_presence = if (secure_enclave_mode) wrap.require_user_presence else null,
     };
 }
 
@@ -1046,9 +1161,13 @@ fn unwrapDek(allocator: std.mem.Allocator, record: WrappedDekRecord) ![]u8 {
 }
 
 fn wrapSecretForBackend(allocator: std.mem.Allocator, backend: []const u8, prompt: []const u8, keys_path: ?[]const u8, key_version: ?u32, record: ?WrappedDekRecord) !WrapSecret {
+    return wrapSecretForBackendWithOptions(allocator, backend, prompt, keys_path, key_version, record, .{});
+}
+
+fn wrapSecretForBackendWithOptions(allocator: std.mem.Allocator, backend: []const u8, prompt: []const u8, keys_path: ?[]const u8, key_version: ?u32, record: ?WrappedDekRecord, options: WrapBackendOptions) !WrapSecret {
     if (std.mem.eql(u8, backend, "insecure-keyfile")) return .{ .secret = try allocator.dupe(u8, "insecure-local-keyfile") };
     if (std.mem.eql(u8, backend, "passphrase")) return .{ .secret = try promptSecret(allocator, prompt) };
-    if (std.mem.eql(u8, backend, "platform-secure-store")) return platformStoreWrapSecret(allocator, keys_path, key_version, record);
+    if (std.mem.eql(u8, backend, "platform-secure-store")) return platformStoreWrapSecret(allocator, keys_path, key_version, record, options);
     if (std.mem.eql(u8, backend, "tpm2")) return tpm2WrapSecret(allocator, record);
     return error.UnsupportedWrapBackend;
 }
@@ -1080,14 +1199,27 @@ fn deriveWrapKeyArgon2id(allocator: std.mem.Allocator, out: *[dek_len]u8, passph
     try crypto.pwhash.argon2.kdf(allocator, out, passphrase, salt, params, .argon2id);
 }
 
+fn deriveWrapKeyHkdfSha256(out: *[dek_len]u8, ikm: []const u8, salt: []const u8) void {
+    const hkdf = crypto.kdf.hkdf.HkdfSha256;
+    const prk = hkdf.extract(salt, ikm);
+    hkdf.expand(out, "ugrant-dek-wrap", prk);
+}
+
 fn deriveWrapKeyForRecord(allocator: std.mem.Allocator, out: *[dek_len]u8, passphrase: []const u8, salt: []const u8, record: WrappedDekRecord) !void {
     if (record.kdf) |kdf_name| {
-        if (!std.mem.eql(u8, kdf_name, argon2_kdf_name)) return error.UnsupportedWrapKdf;
-        return deriveWrapKeyArgon2id(allocator, out, passphrase, salt, .{
-            .t = record.kdf_t orelse argon2_params.t,
-            .m = record.kdf_m orelse argon2_params.m,
-            .p = @as(u24, @intCast(record.kdf_p orelse argon2_params.p)),
-        });
+        if (std.mem.eql(u8, kdf_name, argon2_kdf_name)) {
+            return deriveWrapKeyArgon2id(allocator, out, passphrase, salt, .{
+                .t = record.kdf_t orelse argon2_params.t,
+                .m = record.kdf_m orelse argon2_params.m,
+                .p = @as(u24, @intCast(record.kdf_p orelse argon2_params.p)),
+            });
+        }
+        if (std.mem.eql(u8, kdf_name, hkdf_sha256_kdf_name)) {
+            if (!isMacOsSecureEnclaveRecord(record) or record.secure_enclave_ephemeral_pub_b64 == null) return error.InvalidWrappedDek;
+            deriveWrapKeyHkdfSha256(out, passphrase, salt);
+            return;
+        }
+        return error.UnsupportedWrapKdf;
     }
     deriveLegacyWrapKey(out, passphrase, salt);
 }
@@ -1096,10 +1228,17 @@ fn saveWrappedDek(keys_path: []const u8, record: WrappedDekRecord) !void {
     var list = std.ArrayList(u8){};
     defer list.deinit(std.heap.page_allocator);
     try list.writer(std.heap.page_allocator).print("{{\"version\":{},\"backend\":\"{s}\",\"key_version\":{},\"salt_b64\":\"{s}\",\"nonce_b64\":\"{s}\",\"ciphertext_b64\":\"{s}\",\"created_at\":\"{s}\"", .{ record.version, record.backend, record.key_version, record.salt_b64, record.nonce_b64, record.ciphertext_b64, record.created_at });
-    if (record.kdf) |v| try list.writer(std.heap.page_allocator).print(",\"kdf\":\"{s}\",\"kdf_t\":{},\"kdf_m\":{},\"kdf_p\":{}", .{ v, record.kdf_t.?, record.kdf_m.?, record.kdf_p.? });
+    if (record.kdf) |v| {
+        try list.writer(std.heap.page_allocator).print(",\"kdf\":\"{s}\"", .{v});
+        if (record.kdf_t != null and record.kdf_m != null and record.kdf_p != null) {
+            try list.writer(std.heap.page_allocator).print(",\"kdf_t\":{},\"kdf_m\":{},\"kdf_p\":{}", .{ record.kdf_t.?, record.kdf_m.?, record.kdf_p.? });
+        }
+    }
     if (record.secret_ref) |v| try list.writer(std.heap.page_allocator).print(",\"secret_ref\":\"{s}\"", .{v});
     if (record.tpm2_pub_b64) |v| try list.writer(std.heap.page_allocator).print(",\"tpm2_pub_b64\":\"{s}\"", .{v});
     if (record.tpm2_priv_b64) |v| try list.writer(std.heap.page_allocator).print(",\"tpm2_priv_b64\":\"{s}\"", .{v});
+    if (record.secure_enclave_ephemeral_pub_b64) |v| try list.writer(std.heap.page_allocator).print(",\"secure_enclave_ephemeral_pub_b64\":\"{s}\"", .{v});
+    if (record.require_user_presence) |v| try list.writer(std.heap.page_allocator).print(",\"require_user_presence\":{}", .{v});
     try list.append(std.heap.page_allocator, '}');
     const rendered = try list.toOwnedSlice(std.heap.page_allocator);
     defer std.heap.page_allocator.free(rendered);
@@ -1139,6 +1278,8 @@ fn loadWrappedDek(allocator: std.mem.Allocator, keys_path: []const u8) !WrappedD
         .secret_ref = if (obj.get("secret_ref")) |v| try allocator.dupe(u8, v.string) else null,
         .tpm2_pub_b64 = if (obj.get("tpm2_pub_b64")) |v| try allocator.dupe(u8, v.string) else null,
         .tpm2_priv_b64 = if (obj.get("tpm2_priv_b64")) |v| try allocator.dupe(u8, v.string) else null,
+        .secure_enclave_ephemeral_pub_b64 = if (obj.get("secure_enclave_ephemeral_pub_b64")) |v| try allocator.dupe(u8, v.string) else null,
+        .require_user_presence = if (obj.get("require_user_presence")) |v| v.bool else null,
     };
 }
 
@@ -1152,6 +1293,7 @@ fn freeWrappedDekRecord(allocator: std.mem.Allocator, record: WrappedDekRecord) 
     if (record.secret_ref) |v| allocator.free(v);
     if (record.tpm2_pub_b64) |v| allocator.free(v);
     if (record.tpm2_priv_b64) |v| allocator.free(v);
+    if (record.secure_enclave_ephemeral_pub_b64) |v| allocator.free(v);
 }
 
 fn freeWrapSecret(allocator: std.mem.Allocator, wrap: WrapSecret) void {
@@ -1159,6 +1301,7 @@ fn freeWrapSecret(allocator: std.mem.Allocator, wrap: WrapSecret) void {
     if (wrap.secret_ref) |v| allocator.free(v);
     if (wrap.tpm2_pub_b64) |v| allocator.free(v);
     if (wrap.tpm2_priv_b64) |v| allocator.free(v);
+    if (wrap.secure_enclave_ephemeral_pub_b64) |v| allocator.free(v);
 }
 
 fn dpapiDataBlob(bytes: []const u8) c.DATA_BLOB {
@@ -1196,6 +1339,298 @@ fn unprotectDpapiBytes(allocator: std.mem.Allocator, protected: []const u8) ![]u
 
     const plaintext_slice = @as([*]u8, @ptrCast(output.pbData))[0..output.cbData];
     return allocator.dupe(u8, plaintext_slice);
+}
+
+const macos_secure_enclave_helper_script =
+    "import Foundation\n" ++
+    "import Security\n" ++
+    "func fail(_ message: String) -> Never {\n" ++
+    "    FileHandle.standardError.write(Data((message + \"\\n\").utf8))\n" ++
+    "    exit(1)\n" ++
+    "}\n" ++
+    "func secError(_ error: Unmanaged<CFError>?) -> String {\n" ++
+    "    guard let error else { return \"unknown Security error\" }\n" ++
+    "    return String(describing: error.takeRetainedValue())\n" ++
+    "}\n" ++
+    "func appTag(_ keyVersion: Int) -> String {\n" ++
+    "    \"dev.ugrant.secure-enclave.dek:\\(keyVersion)\"\n" ++
+    "}\n" ++
+    "func deleteKey(tag: String) {\n" ++
+    "    let query: [String: Any] = [\n" ++
+    "        kSecClass as String: kSecClassKey,\n" ++
+    "        kSecAttrApplicationTag as String: Data(tag.utf8),\n" ++
+    "        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
+    "    ]\n" ++
+    "    let status = SecItemDelete(query as CFDictionary)\n" ++
+    "    if status != errSecSuccess && status != errSecItemNotFound {\n" ++
+    "        fail(\"SecItemDelete failed: \\(status)\")\n" ++
+    "    }\n" ++
+    "}\n" ++
+    "func createEphemeralPrivateKey() -> SecKey {\n" ++
+    "    var error: Unmanaged<CFError>?\n" ++
+    "    let attrs: [String: Any] = [\n" ++
+    "        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
+    "        kSecAttrKeySizeInBits as String: 256,\n" ++
+    "        kSecPrivateKeyAttrs as String: [\n" ++
+    "            kSecAttrIsPermanent as String: false,\n" ++
+    "        ],\n" ++
+    "    ]\n" ++
+    "    guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) else {\n" ++
+    "        fail(\"ephemeral key generation failed: \\(secError(error))\")\n" ++
+    "    }\n" ++
+    "    return key\n" ++
+    "}\n" ++
+    "func createSecureEnclavePrivateKey(tag: String, requireUserPresence: Bool) -> SecKey {\n" ++
+    "    deleteKey(tag: tag)\n" ++
+    "    var accessError: Unmanaged<CFError>?\n" ++
+    "    var flags: SecAccessControlCreateFlags = [.privateKeyUsage]\n" ++
+    "    if requireUserPresence { flags.insert(.userPresence) }\n" ++
+    "    guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &accessError) else {\n" ++
+    "        fail(\"SecAccessControlCreateWithFlags failed: \\(secError(accessError))\")\n" ++
+    "    }\n" ++
+    "    let attrs: [String: Any] = [\n" ++
+    "        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
+    "        kSecAttrKeySizeInBits as String: 256,\n" ++
+    "        kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,\n" ++
+    "        kSecPrivateKeyAttrs as String: [\n" ++
+    "            kSecAttrIsPermanent as String: true,\n" ++
+    "            kSecAttrApplicationTag as String: Data(tag.utf8),\n" ++
+    "            kSecAttrAccessControl as String: access,\n" ++
+    "        ],\n" ++
+    "    ]\n" ++
+    "    var error: Unmanaged<CFError>?\n" ++
+    "    guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) else {\n" ++
+    "        fail(\"secure enclave key generation failed: \\(secError(error))\")\n" ++
+    "    }\n" ++
+    "    return key\n" ++
+    "}\n" ++
+    "func loadSecureEnclavePrivateKey(tag: String) -> SecKey {\n" ++
+    "    let query: [String: Any] = [\n" ++
+    "        kSecClass as String: kSecClassKey,\n" ++
+    "        kSecAttrApplicationTag as String: Data(tag.utf8),\n" ++
+    "        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
+    "        kSecReturnRef as String: true,\n" ++
+    "    ]\n" ++
+    "    var item: CFTypeRef?\n" ++
+    "    let status = SecItemCopyMatching(query as CFDictionary, &item)\n" ++
+    "    guard status == errSecSuccess, let key = item as! SecKey? else {\n" ++
+    "        fail(\"SecItemCopyMatching failed: \\(status)\")\n" ++
+    "    }\n" ++
+    "    return key\n" ++
+    "}\n" ++
+    "func publicKeyData(_ key: SecKey) -> Data {\n" ++
+    "    guard let pub = SecKeyCopyPublicKey(key) else { fail(\"missing public key\") }\n" ++
+    "    var error: Unmanaged<CFError>?\n" ++
+    "    guard let data = SecKeyCopyExternalRepresentation(pub, &error) as Data? else {\n" ++
+    "        fail(\"public key export failed: \\(secError(error))\")\n" ++
+    "    }\n" ++
+    "    return data\n" ++
+    "}\n" ++
+    "func publicKeyFromData(_ data: Data) -> SecKey {\n" ++
+    "    var error: Unmanaged<CFError>?\n" ++
+    "    let attrs: [String: Any] = [\n" ++
+    "        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
+    "        kSecAttrKeyClass as String: kSecAttrKeyClassPublic,\n" ++
+    "        kSecAttrKeySizeInBits as String: 256,\n" ++
+    "    ]\n" ++
+    "    guard let key = SecKeyCreateWithData(data as CFData, attrs as CFDictionary, &error) else {\n" ++
+    "        fail(\"public key import failed: \\(secError(error))\")\n" ++
+    "    }\n" ++
+    "    return key\n" ++
+    "}\n" ++
+    "func sharedSecret(privateKey: SecKey, publicKey: SecKey) -> Data {\n" ++
+    "    let algorithm = SecKeyAlgorithm.ecdhKeyExchangeStandard\n" ++
+    "    guard SecKeyIsAlgorithmSupported(privateKey, .keyExchange, algorithm) else {\n" ++
+    "        fail(\"ECDH key exchange is not supported for this key\")\n" ++
+    "    }\n" ++
+    "    var error: Unmanaged<CFError>?\n" ++
+    "    let params: [String: Any] = [kSecUseAuthenticationUI as String: kSecUseAuthenticationUIAllow]\n" ++
+    "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params as CFDictionary, &error) as Data? else {\n" ++
+    "        fail(\"key exchange failed: \\(secError(error))\")\n" ++
+    "    }\n" ++
+    "    return data\n" ++
+    "}\n" ++
+    "func emit(_ payload: [String: Any]) {\n" ++
+    "    do {\n" ++
+    "        let data = try JSONSerialization.data(withJSONObject: payload, options: [])\n" ++
+    "        FileHandle.standardOutput.write(data)\n" ++
+    "    } catch {\n" ++
+    "        fail(\"JSON serialization failed: \\(error)\")\n" ++
+    "    }\n" ++
+    "}\n" ++
+    "let args = CommandLine.arguments\n" ++
+    "if args.count < 2 { fail(\"missing mode\") }\n" ++
+    "switch args[1] {\n" ++
+    "case \"create\":\n" ++
+    "    if args.count != 4 { fail(\"usage: create <key-version> <require-user-presence>\") }\n" ++
+    "    guard let keyVersion = Int(args[2]) else { fail(\"invalid key version\") }\n" ++
+    "    let requireUserPresence = args[3] == \"1\" || args[3].lowercased() == \"true\"\n" ++
+    "    let tag = appTag(keyVersion)\n" ++
+    "    let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence)\n" ++
+    "    let ephemeralPrivate = createEphemeralPrivateKey()\n" ++
+    "    let secret = sharedSecret(privateKey: ephemeralPrivate, publicKey: SecKeyCopyPublicKey(enclaveKey)!)\n" ++
+    "    emit([\n" ++
+    "        \"secret_b64\": secret.base64EncodedString(),\n" ++
+    "        \"secret_ref\": \"macos-secure-enclave:tag=\\(tag)\",\n" ++
+    "        \"ephemeral_pub_b64\": publicKeyData(ephemeralPrivate).base64EncodedString(),\n" ++
+    "        \"require_user_presence\": requireUserPresence,\n" ++
+    "    ])\n" ++
+    "case \"load\":\n" ++
+    "    if args.count != 4 { fail(\"usage: load <tag> <ephemeral-pub-b64>\") }\n" ++
+    "    guard let ephemeralPub = Data(base64Encoded: args[3]) else { fail(\"invalid ephemeral public key base64\") }\n" ++
+    "    let enclaveKey = loadSecureEnclavePrivateKey(tag: args[2])\n" ++
+    "    let secret = sharedSecret(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))\n" ++
+    "    emit([\n" ++
+    "        \"secret_b64\": secret.base64EncodedString(),\n" ++
+    "        \"secret_ref\": \"macos-secure-enclave:tag=\\(args[2])\",\n" ++
+    "    ])\n" ++
+    "case \"delete\":\n" ++
+    "    if args.count != 3 { fail(\"usage: delete <tag>\") }\n" ++
+    "    deleteKey(tag: args[2])\n" ++
+    "default:\n" ++
+    "    fail(\"unknown mode: \\(args[1])\")\n" ++
+    "}\n";
+
+fn secureEnclaveAvailable(allocator: std.mem.Allocator) bool {
+    if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return true;
+    if (builtin.os.tag != .macos) return false;
+    return commandExists(allocator, "xcrun");
+}
+
+fn formatMacOsSecureEnclaveApplicationTag(allocator: std.mem.Allocator, key_version: u32) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}{}", .{ macos_secure_enclave_application_tag_prefix, key_version });
+}
+
+fn formatMacOsSecureEnclaveSecretRefForTag(allocator: std.mem.Allocator, tag: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ macos_secure_enclave_secret_ref_prefix, tag });
+}
+
+fn formatMacOsSecureEnclaveSecretRef(allocator: std.mem.Allocator, key_version: u32) ![]u8 {
+    const tag = try formatMacOsSecureEnclaveApplicationTag(allocator, key_version);
+    defer allocator.free(tag);
+    return formatMacOsSecureEnclaveSecretRefForTag(allocator, tag);
+}
+
+fn parseMacOsSecureEnclaveSecretRef(secret_ref: []const u8) !MacOsSecureEnclaveRef {
+    if (!std.mem.startsWith(u8, secret_ref, macos_secure_enclave_secret_ref_prefix)) return error.InvalidWrappedDek;
+    const tag = secret_ref[macos_secure_enclave_secret_ref_prefix.len..];
+    if (!std.mem.startsWith(u8, tag, macos_secure_enclave_application_tag_prefix)) return error.InvalidWrappedDek;
+    if (std.mem.indexOfScalar(u8, tag, ';') != null) return error.InvalidWrappedDek;
+    const key_version_text = tag[macos_secure_enclave_application_tag_prefix.len..];
+    if (key_version_text.len == 0) return error.InvalidWrappedDek;
+    const key_version = std.fmt.parseUnsigned(u32, key_version_text, 10) catch return error.InvalidWrappedDek;
+    return .{ .tag = tag, .key_version = key_version };
+}
+
+fn isMacOsSecureEnclaveSecretRef(secret_ref: []const u8) bool {
+    _ = parseMacOsSecureEnclaveSecretRef(secret_ref) catch return false;
+    return true;
+}
+
+fn isMacOsSecureEnclaveSecretRefOpt(secret_ref: ?[]const u8) bool {
+    if (secret_ref) |ref| return isMacOsSecureEnclaveSecretRef(ref);
+    return false;
+}
+
+fn isMacOsSecureEnclaveRecord(record: WrappedDekRecord) bool {
+    return isMacOsSecureEnclaveSecretRefOpt(record.secret_ref);
+}
+
+fn secureEnclaveOptionsFromRecord(record: WrappedDekRecord) WrapBackendOptions {
+    return .{
+        .secure_enclave = isMacOsSecureEnclaveRecord(record),
+        .require_user_presence = record.require_user_presence orelse false,
+    };
+}
+
+fn parseSecureEnclaveWrapSecretFromJson(allocator: std.mem.Allocator, stdout: []const u8) !WrapSecret {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, stdout, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    const secret_b64 = obj.get("secret_b64") orelse return error.WrapBackendUnavailable;
+    const secret_ref = obj.get("secret_ref") orelse return error.WrapBackendUnavailable;
+    return .{
+        .secret = try b64DecodeAlloc(allocator, secret_b64.string),
+        .secret_ref = try allocator.dupe(u8, secret_ref.string),
+        .secure_enclave_ephemeral_pub_b64 = if (obj.get("ephemeral_pub_b64")) |v| try allocator.dupe(u8, v.string) else null,
+        .require_user_presence = if (obj.get("require_user_presence")) |v| v.bool else false,
+    };
+}
+
+fn runMacOsSecureEnclaveHelper(allocator: std.mem.Allocator, argv: []const []const u8) !WrapSecret {
+    const result = runChildWithInput(allocator, argv, macos_secure_enclave_helper_script, 16 * 1024) catch return error.WrapBackendUnavailable;
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .Exited => |code| if (code != 0) {
+            allocator.free(result.stdout);
+            return error.WrapBackendUnavailable;
+        },
+        else => {
+            allocator.free(result.stdout);
+            return error.WrapBackendUnavailable;
+        },
+    }
+    defer allocator.free(result.stdout);
+    return parseSecureEnclaveWrapSecretFromJson(allocator, result.stdout);
+}
+
+fn createMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, key_version: u32, require_user_presence: bool) !WrapSecret {
+    if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) {
+        return .{
+            .secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_SECRET", "secure-enclave-test-secret"),
+            .secret_ref = try formatMacOsSecureEnclaveSecretRef(allocator, key_version),
+            .secure_enclave_ephemeral_pub_b64 = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_EPHEMERAL_PUB_B64", "c2VjdXJlLWVuY2xhdmUtdGVzdC1lcGhlbWVyYWwtcHVi"),
+            .require_user_presence = require_user_presence,
+        };
+    }
+    if (builtin.os.tag != .macos) return error.WrapBackendUnavailable;
+
+    const key_version_text = try std.fmt.allocPrint(allocator, "{}", .{key_version});
+    defer allocator.free(key_version_text);
+    return runMacOsSecureEnclaveHelper(allocator, &.{ macos_xcrun_tool, "swift", "-", "create", key_version_text, if (require_user_presence) "1" else "0" });
+}
+
+fn loadMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []const u8, expected_key_version: u32, ephemeral_pub_b64: []const u8, require_user_presence: bool) !WrapSecret {
+    const parsed = try parseMacOsSecureEnclaveSecretRef(secret_ref);
+    if (parsed.key_version != expected_key_version) return error.InvalidWrappedDek;
+
+    if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) {
+        return .{
+            .secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_SECRET", "secure-enclave-test-secret"),
+            .secret_ref = try allocator.dupe(u8, secret_ref),
+            .secure_enclave_ephemeral_pub_b64 = try allocator.dupe(u8, ephemeral_pub_b64),
+            .require_user_presence = require_user_presence,
+        };
+    }
+    if (builtin.os.tag != .macos) return error.WrapBackendUnavailable;
+
+    var wrap = try runMacOsSecureEnclaveHelper(allocator, &.{ macos_xcrun_tool, "swift", "-", "load", parsed.tag, ephemeral_pub_b64 });
+    errdefer freeWrapSecret(allocator, wrap);
+    if (wrap.secure_enclave_ephemeral_pub_b64 == null) {
+        wrap.secure_enclave_ephemeral_pub_b64 = try allocator.dupe(u8, ephemeral_pub_b64);
+    }
+    wrap.require_user_presence = require_user_presence;
+    return wrap;
+}
+
+fn deleteMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []const u8) !void {
+    const parsed = try parseMacOsSecureEnclaveSecretRef(secret_ref);
+    if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return;
+    if (builtin.os.tag != .macos) return error.WrapBackendUnavailable;
+
+    const result = runChildWithInput(allocator, &.{ macos_xcrun_tool, "swift", "-", "delete", parsed.tag }, macos_secure_enclave_helper_script, 4096) catch return error.WrapBackendUnavailable;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .Exited => |code| if (code != 0) return error.WrapBackendUnavailable,
+        else => return error.WrapBackendUnavailable,
+    }
+}
+
+fn cleanupPersistedWrapSecret(allocator: std.mem.Allocator, backend: []const u8, wrap: WrapSecret) !void {
+    if (!std.mem.eql(u8, backend, "platform-secure-store")) return;
+    const secret_ref = wrap.secret_ref orelse return;
+    if (isMacOsSecureEnclaveSecretRef(secret_ref)) try deleteMacOsSecureEnclaveSecret(allocator, secret_ref);
 }
 
 fn formatMacOsKeychainAccount(allocator: std.mem.Allocator, key_version: u32) ![]u8 {
@@ -1277,9 +1712,13 @@ fn storeMacOsKeychainSecret(allocator: std.mem.Allocator, key_version: u32) !Wra
     return .{ .secret = secret, .secret_ref = secret_ref };
 }
 
-fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8, key_version: ?u32, record: ?WrappedDekRecord) !WrapSecret {
+fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8, key_version: ?u32, record: ?WrappedDekRecord, options: WrapBackendOptions) !WrapSecret {
     if (record) |existing| {
         const secret_ref = existing.secret_ref orelse return error.InvalidWrappedDek;
+        if (isMacOsSecureEnclaveSecretRef(secret_ref)) {
+            const ephemeral_pub_b64 = existing.secure_enclave_ephemeral_pub_b64 orelse return error.InvalidWrappedDek;
+            return loadMacOsSecureEnclaveSecret(allocator, secret_ref, existing.key_version, ephemeral_pub_b64, existing.require_user_presence orelse false);
+        }
         if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return .{ .secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_PLATFORM_STORE_SECRET", "platform-store-test-secret"), .secret_ref = try allocator.dupe(u8, secret_ref) };
         if (builtin.os.tag == .windows) {
             const protected = try b64DecodeAlloc(allocator, secret_ref);
@@ -1296,6 +1735,9 @@ fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8,
         const secret = try allocator.dupe(u8, std.mem.trim(u8, result.stdout, "\r\n\t "));
         allocator.free(result.stdout);
         return .{ .secret = secret, .secret_ref = try allocator.dupe(u8, secret_ref) };
+    }
+    if (options.secure_enclave) {
+        return createMacOsSecureEnclaveSecret(allocator, key_version orelse return error.InvalidArgs, options.require_user_presence);
     }
     if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) {
         const secret_ref = if (builtin.os.tag == .macos)
@@ -1519,7 +1961,7 @@ fn revokeGrantState(db: *c.sqlite3, profile_name: []const u8) !bool {
     return c.sqlite3_changes(db) > 0;
 }
 
-fn performRekey(allocator: std.mem.Allocator, db: *c.sqlite3, keys_path: []const u8, current_record: WrappedDekRecord, current_wrap_secret: []const u8, target_backend: []const u8, target_wrap_secret: []const u8, secret_ref: ?[]const u8, tpm2_pub_b64: ?[]const u8, tpm2_priv_b64: ?[]const u8) !RekeyStats {
+fn performRekey(allocator: std.mem.Allocator, db: *c.sqlite3, keys_path: []const u8, current_record: WrappedDekRecord, current_wrap_secret: []const u8, target_backend: []const u8, target_wrap_secret: []const u8, secret_ref: ?[]const u8, tpm2_pub_b64: ?[]const u8, tpm2_priv_b64: ?[]const u8, secure_enclave_ephemeral_pub_b64: ?[]const u8, require_user_presence: bool) !RekeyStats {
     const old_dek = try unwrapDekWithSecret(allocator, current_record, current_wrap_secret);
     defer allocator.free(old_dek);
 
@@ -1529,13 +1971,31 @@ fn performRekey(allocator: std.mem.Allocator, db: *c.sqlite3, keys_path: []const
 
     const stats = try rekeyEncryptedState(allocator, db, old_dek, &new_dek);
 
-    const new_record = try wrapDekForBackend(allocator, target_backend, current_record.key_version + 1, target_wrap_secret, &new_dek, secret_ref, tpm2_pub_b64, tpm2_priv_b64);
+    const target_wrap = WrapSecret{
+        .secret = @constCast(target_wrap_secret),
+        .secret_ref = secret_ref,
+        .tpm2_pub_b64 = tpm2_pub_b64,
+        .tpm2_priv_b64 = tpm2_priv_b64,
+        .secure_enclave_ephemeral_pub_b64 = secure_enclave_ephemeral_pub_b64,
+        .require_user_presence = require_user_presence,
+    };
+
+    const new_record = try wrapDekForBackend(allocator, target_backend, current_record.key_version + 1, target_wrap_secret, &new_dek, target_wrap);
     defer freeWrappedDekRecord(allocator, new_record);
 
     saveWrappedDek(keys_path, new_record) catch |err| {
         _ = try rekeyEncryptedState(allocator, db, &new_dek, old_dek);
+        cleanupPersistedWrapSecret(allocator, target_backend, target_wrap) catch {};
         return err;
     };
+
+    if (current_record.secret_ref) |current_secret_ref| {
+        if (!std.mem.eql(u8, current_secret_ref, secret_ref orelse "")) {
+            if (isMacOsSecureEnclaveSecretRef(current_secret_ref)) {
+                deleteMacOsSecureEnclaveSecret(allocator, current_secret_ref) catch {};
+            }
+        }
+    }
 
     return .{
         .key_version = current_record.key_version + 1,
@@ -2565,6 +3025,7 @@ fn nullableIntColumn(stmt: *c.sqlite3_stmt, idx: c_int) ?i64 {
 fn collectStatusSummary(allocator: std.mem.Allocator, paths: Paths) !StatusSummary {
     const initialized = (try fileExists(paths.db_path)) and (try fileExists(paths.keys_path));
     var backend: ?[]const u8 = null;
+    var backend_provider: ?[]const u8 = null;
     var security_mode: []const u8 = "uninitialized";
     var profile_count: usize = 0;
     var grant_count: usize = 0;
@@ -2573,6 +3034,9 @@ fn collectStatusSummary(allocator: std.mem.Allocator, paths: Paths) !StatusSumma
         const wrapped = try loadWrappedDek(allocator, paths.keys_path);
         defer freeWrappedDekRecord(allocator, wrapped);
         backend = try allocator.dupe(u8, wrapped.backend);
+        if (backendProviderLabel(wrapped.backend, wrapped.secret_ref)) |provider| {
+            backend_provider = try allocator.dupe(u8, provider);
+        }
         security_mode = if (std.mem.eql(u8, wrapped.backend, "insecure-keyfile") or wrapped.kdf == null) "degraded" else "normal";
         const db = try openDb(paths.db_path);
         defer _ = c.sqlite3_close(db);
@@ -2587,6 +3051,7 @@ fn collectStatusSummary(allocator: std.mem.Allocator, paths: Paths) !StatusSumma
         .db_path = try allocator.dupe(u8, paths.db_path),
         .keys_path = try allocator.dupe(u8, paths.keys_path),
         .backend = backend,
+        .backend_provider = backend_provider,
         .security_mode = try allocator.dupe(u8, security_mode),
         .profile_count = profile_count,
         .grant_count = grant_count,
@@ -2625,6 +3090,7 @@ fn freeStatusSummary(allocator: std.mem.Allocator, summary: StatusSummary) void 
     allocator.free(summary.db_path);
     allocator.free(summary.keys_path);
     if (summary.backend) |v| allocator.free(v);
+    if (summary.backend_provider) |v| allocator.free(v);
     allocator.free(summary.security_mode);
     allocator.free(summary.grant_state);
 }
@@ -2663,7 +3129,7 @@ test "wrapped dek metadata round trips optional backend fields" {
     defer allocator.free(base);
     const keys_path = try std.fs.path.join(allocator, &.{ base, "keys.json" });
     defer allocator.free(keys_path);
-    const record = WrappedDekRecord{ .version = 3, .backend = try allocator.dupe(u8, "platform-secure-store"), .key_version = 4, .salt_b64 = try allocator.dupe(u8, "salt"), .nonce_b64 = try allocator.dupe(u8, "nonce"), .ciphertext_b64 = try allocator.dupe(u8, "cipher"), .created_at = try allocator.dupe(u8, "123"), .kdf = try allocator.dupe(u8, argon2_kdf_name), .kdf_t = argon2_params.t, .kdf_m = argon2_params.m, .kdf_p = argon2_params.p, .secret_ref = try allocator.dupe(u8, "ref-1"), .tpm2_pub_b64 = try allocator.dupe(u8, "pub"), .tpm2_priv_b64 = try allocator.dupe(u8, "priv") };
+    const record = WrappedDekRecord{ .version = 3, .backend = try allocator.dupe(u8, "platform-secure-store"), .key_version = 4, .salt_b64 = try allocator.dupe(u8, "salt"), .nonce_b64 = try allocator.dupe(u8, "nonce"), .ciphertext_b64 = try allocator.dupe(u8, "cipher"), .created_at = try allocator.dupe(u8, "123"), .kdf = try allocator.dupe(u8, argon2_kdf_name), .kdf_t = argon2_params.t, .kdf_m = argon2_params.m, .kdf_p = argon2_params.p, .secret_ref = try allocator.dupe(u8, "ref-1"), .tpm2_pub_b64 = try allocator.dupe(u8, "pub"), .tpm2_priv_b64 = try allocator.dupe(u8, "priv"), .secure_enclave_ephemeral_pub_b64 = try allocator.dupe(u8, "ephemeral-pub"), .require_user_presence = false };
     defer freeWrappedDekRecord(allocator, record);
     try saveWrappedDek(keys_path, record);
     const loaded = try loadWrappedDek(allocator, keys_path);
@@ -2673,6 +3139,8 @@ test "wrapped dek metadata round trips optional backend fields" {
     try std.testing.expectEqualStrings("ref-1", loaded.secret_ref.?);
     try std.testing.expectEqualStrings("pub", loaded.tpm2_pub_b64.?);
     try std.testing.expectEqualStrings("priv", loaded.tpm2_priv_b64.?);
+    try std.testing.expectEqualStrings("ephemeral-pub", loaded.secure_enclave_ephemeral_pub_b64.?);
+    try std.testing.expectEqual(false, loaded.require_user_presence.?);
 }
 
 test "windows platform secure store round trips via DPAPI" {
@@ -2686,7 +3154,7 @@ test "windows platform secure store round trips via DPAPI" {
     const keys_path = try std.fs.path.join(allocator, &.{ base, "keys.json" });
     defer allocator.free(keys_path);
 
-    const created = try platformStoreWrapSecret(allocator, keys_path, 1, null);
+    const created = try platformStoreWrapSecret(allocator, keys_path, 1, null, .{});
     defer freeWrapSecret(allocator, created);
     try std.testing.expect(created.secret_ref != null);
 
@@ -2702,7 +3170,7 @@ test "windows platform secure store round trips via DPAPI" {
     };
     defer freeWrappedDekRecord(allocator, record);
 
-    const loaded = try platformStoreWrapSecret(allocator, null, record.key_version, record);
+    const loaded = try platformStoreWrapSecret(allocator, null, record.key_version, record, .{});
     defer freeWrapSecret(allocator, loaded);
     try std.testing.expectEqualStrings(created.secret, loaded.secret);
     try std.testing.expectEqualStrings(created.secret_ref.?, loaded.secret_ref.?);
@@ -2732,8 +3200,23 @@ test "macos keychain secret refs reject malformed prefixes and numeric versions"
     try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:4294967296"));
 }
 
+test "macos secure enclave secret refs are strict and versioned" {
+    const allocator = std.testing.allocator;
+
+    const secret_ref = try formatMacOsSecureEnclaveSecretRef(allocator, 9);
+    defer allocator.free(secret_ref);
+
+    const parsed = try parseMacOsSecureEnclaveSecretRef(secret_ref);
+    try std.testing.expectEqualStrings("dev.ugrant.secure-enclave.dek:9", parsed.tag);
+    try std.testing.expectEqual(@as(u32, 9), parsed.key_version);
+
+    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsSecureEnclaveSecretRef("macos-secure-enclave:tag=wrong:9"));
+    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsSecureEnclaveSecretRef("macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:"));
+    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsSecureEnclaveSecretRef("macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:9;extra=x"));
+}
+
 test "platform secure store provider label matches the local OS" {
-    const provider = backendProviderLabel("platform-secure-store").?;
+    const provider = backendProviderLabel("platform-secure-store", null).?;
 
     switch (builtin.os.tag) {
         .macos => try std.testing.expectEqualStrings("macOS Keychain", provider),
@@ -2741,9 +3224,39 @@ test "platform secure store provider label matches the local OS" {
         else => try std.testing.expectEqualStrings("Secret Service", provider),
     }
 
-    try std.testing.expect(backendProviderLabel("tpm2") == null);
-    try std.testing.expect(backendProviderLabel("passphrase") == null);
-    try std.testing.expect(backendProviderLabel("insecure-keyfile") == null);
+    try std.testing.expect(backendProviderLabel("tpm2", null) == null);
+    try std.testing.expect(backendProviderLabel("passphrase", null) == null);
+    try std.testing.expect(backendProviderLabel("insecure-keyfile", null) == null);
+}
+
+test "secure enclave records report secure enclave backend provider" {
+    try std.testing.expectEqualStrings("macOS Secure Enclave", backendProviderLabel("platform-secure-store", "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:3").?);
+}
+
+test "secure enclave platform store wraps and unwraps via synthetic provider" {
+    if (!envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return;
+
+    const allocator = std.testing.allocator;
+    const created = try platformStoreWrapSecret(allocator, null, 5, null, .{ .secure_enclave = true, .require_user_presence = true });
+    defer freeWrapSecret(allocator, created);
+    try std.testing.expect(isMacOsSecureEnclaveSecretRef(created.secret_ref.?));
+    try std.testing.expect(created.require_user_presence);
+    try std.testing.expect(created.secure_enclave_ephemeral_pub_b64 != null);
+
+    var dek: [dek_len]u8 = [_]u8{0x5a} ** dek_len;
+    const record = try wrapDekForBackend(allocator, "platform-secure-store", 5, created.secret, &dek, created);
+    defer freeWrappedDekRecord(allocator, record);
+    try std.testing.expectEqualStrings(hkdf_sha256_kdf_name, record.kdf.?);
+    try std.testing.expectEqual(true, record.require_user_presence.?);
+    try std.testing.expect(record.secure_enclave_ephemeral_pub_b64 != null);
+
+    const loaded = try platformStoreWrapSecret(allocator, null, record.key_version, record, .{});
+    defer freeWrapSecret(allocator, loaded);
+    try std.testing.expectEqualStrings(created.secret, loaded.secret);
+
+    const unwrapped = try unwrapDekWithSecret(allocator, record, loaded.secret);
+    defer freeSecret(allocator, unwrapped);
+    try std.testing.expectEqualSlices(u8, &dek, unwrapped);
 }
 
 test "legacy wrapped dek records remain readable" {
@@ -2820,7 +3333,7 @@ fn setupTestVault() !TestVault {
     var dek_buf: [dek_len]u8 = undefined;
     for (&dek_buf, 0..) |*byte, idx| byte.* = @as(u8, @intCast(idx + 1));
     const wrap_secret = "insecure-local-keyfile";
-    const wrapped = try wrapDekForBackend(allocator, "insecure-keyfile", 1, wrap_secret, &dek_buf, null, null, null);
+    const wrapped = try wrapDekForBackend(allocator, "insecure-keyfile", 1, wrap_secret, &dek_buf, .{ .secret = @constCast(wrap_secret) });
     errdefer freeWrappedDekRecord(allocator, wrapped);
     try saveWrappedDek(keys_path, wrapped);
     const dek = try unwrapDekWithSecret(allocator, wrapped, wrap_secret);
@@ -2951,7 +3464,7 @@ test "rekey rotates DEK and re-encrypts stored secret fields" {
     const grant_before = try loadRawGrantCipher(allocator, vault.db, "watcher");
     defer freeRawGrantCipher(allocator, grant_before);
 
-    const stats = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", "insecure-keyfile", "insecure-local-keyfile", null, null, null);
+    const stats = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", "insecure-keyfile", "insecure-local-keyfile", null, null, null, null, false);
     try std.testing.expectEqual(@as(u32, 2), stats.key_version);
     try std.testing.expectEqual(@as(usize, 1), stats.profiles_rewritten);
     try std.testing.expectEqual(@as(usize, 1), stats.grants_rewritten);
@@ -3000,7 +3513,7 @@ test "rekey can switch from insecure-keyfile to passphrase backend" {
     const grant_before = try loadRawGrantCipher(allocator, vault.db, "watcher");
     defer freeRawGrantCipher(allocator, grant_before);
 
-    const stats = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", "passphrase", "switch-passphrase", null, null, null);
+    const stats = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", "passphrase", "switch-passphrase", null, null, null, null, false);
     try std.testing.expectEqual(@as(u32, 2), stats.key_version);
 
     const updated_record = try loadWrappedDek(allocator, vault.keys_path);
@@ -3041,7 +3554,7 @@ test "rekey can switch from passphrase to insecure-keyfile backend" {
     var vault = try setupTestVault();
     defer vault.deinit(allocator);
 
-    _ = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", "passphrase", "switch-passphrase", null, null, null);
+    _ = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", "passphrase", "switch-passphrase", null, null, null, null, false);
     const passphrase_record = try loadWrappedDek(allocator, vault.keys_path);
     defer freeWrappedDekRecord(allocator, passphrase_record);
     const passphrase_dek = try unwrapDekWithSecret(allocator, passphrase_record, "switch-passphrase");
@@ -3052,7 +3565,7 @@ test "rekey can switch from passphrase to insecure-keyfile backend" {
     const grant_before = try loadRawGrantCipher(allocator, vault.db, "watcher");
     defer freeRawGrantCipher(allocator, grant_before);
 
-    const stats = try performRekey(allocator, vault.db, vault.keys_path, passphrase_record, "switch-passphrase", "insecure-keyfile", "insecure-local-keyfile", null, null, null);
+    const stats = try performRekey(allocator, vault.db, vault.keys_path, passphrase_record, "switch-passphrase", "insecure-keyfile", "insecure-local-keyfile", null, null, null, null, false);
     try std.testing.expectEqual(@as(u32, 3), stats.key_version);
 
     const updated_record = try loadWrappedDek(allocator, vault.keys_path);
@@ -3097,7 +3610,7 @@ test "rekey can switch from insecure-keyfile to resolved platform-secure-store b
     const target_secret_ref: ?[]const u8 = if (std.mem.eql(u8, target_backend, "platform-secure-store")) "platform-ref-1" else null;
     const target_tpm2_pub: ?[]const u8 = if (std.mem.eql(u8, target_backend, "tpm2")) "dHBtMi1wdWI=" else null;
     const target_tpm2_priv: ?[]const u8 = if (std.mem.eql(u8, target_backend, "tpm2")) "dHBtMi1wcml2" else null;
-    const stats = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", target_backend, "tpm2-test-secret", target_secret_ref, target_tpm2_pub, target_tpm2_priv);
+    const stats = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", target_backend, "tpm2-test-secret", target_secret_ref, target_tpm2_pub, target_tpm2_priv, null, false);
     try std.testing.expectEqual(@as(u32, 2), stats.key_version);
 
     const updated_record = try loadWrappedDek(allocator, vault.keys_path);
@@ -3124,13 +3637,13 @@ test "rekey can switch from tpm2 to platform secure store" {
     var vault = try setupTestVault();
     defer vault.deinit(allocator);
 
-    _ = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", "tpm2", "tpm2-test-secret", null, "dHBtMi1wdWI=", "dHBtMi1wcml2");
+    _ = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", "tpm2", "tpm2-test-secret", null, "dHBtMi1wdWI=", "dHBtMi1wcml2", null, false);
     const tpm2_record = try loadWrappedDek(allocator, vault.keys_path);
     defer freeWrappedDekRecord(allocator, tpm2_record);
     const tpm2_dek = try unwrapDekWithSecret(allocator, tpm2_record, "tpm2-test-secret");
     defer allocator.free(tpm2_dek);
 
-    const stats = try performRekey(allocator, vault.db, vault.keys_path, tpm2_record, "tpm2-test-secret", "platform-secure-store", "platform-store-test-secret", "platform-ref-1", null, null);
+    const stats = try performRekey(allocator, vault.db, vault.keys_path, tpm2_record, "tpm2-test-secret", "platform-secure-store", "platform-store-test-secret", "platform-ref-1", null, null, null, false);
     try std.testing.expectEqual(@as(u32, 3), stats.key_version);
 
     const updated_record = try loadWrappedDek(allocator, vault.keys_path);
@@ -3154,11 +3667,11 @@ test "macos platform secure store hook supports rekey migration" {
     var vault = try setupTestVault();
     defer vault.deinit(allocator);
 
-    const created = try platformStoreWrapSecret(allocator, vault.keys_path, 2, null);
+    const created = try platformStoreWrapSecret(allocator, vault.keys_path, 2, null, .{});
     defer freeWrapSecret(allocator, created);
     try std.testing.expectEqualStrings("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:2", created.secret_ref.?);
 
-    const stats = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", "platform-secure-store", created.secret, created.secret_ref, null, null);
+    const stats = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", "platform-secure-store", created.secret, created.secret_ref, null, null, null, false);
     try std.testing.expectEqual(@as(u32, 2), stats.key_version);
 
     const updated_record = try loadWrappedDek(allocator, vault.keys_path);
@@ -3167,7 +3680,7 @@ test "macos platform secure store hook supports rekey migration" {
     try std.testing.expectEqual(@as(u32, 2), updated_record.key_version);
     try std.testing.expectEqualStrings(created.secret_ref.?, updated_record.secret_ref.?);
 
-    const loaded = try platformStoreWrapSecret(allocator, null, updated_record.key_version, updated_record);
+    const loaded = try platformStoreWrapSecret(allocator, null, updated_record.key_version, updated_record, .{});
     defer freeWrapSecret(allocator, loaded);
     try std.testing.expectEqualStrings(created.secret, loaded.secret);
     try std.testing.expectEqualStrings(created.secret_ref.?, loaded.secret_ref.?);

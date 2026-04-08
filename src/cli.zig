@@ -30,6 +30,8 @@ pub const usage_text =
     \\  --passphrase-env <NAME>    Rewrap to passphrase backend using env var contents
     \\  --passphrase-file <PATH>   Rewrap to passphrase backend using file contents
     \\  --allow-insecure-keyfile   Rewrap to insecure-keyfile backend (explicit opt-in)
+    \\  --secure-enclave           On macOS, use Secure Enclave under platform-secure-store
+    \\  --require-user-presence    Only with --secure-enclave, require local user presence
     \\                            platform-secure-store resolves to the strongest local platform store
     \\                            on Linux: TPM2 first, otherwise Secret Service (secret-tool)
     \\
@@ -58,7 +60,7 @@ pub const env_usage_text = "usage: ugrant env --profile <name> [--format shell|j
 pub const exec_usage_text = "usage: ugrant exec --profile <name> -- <cmd> [args...]\n";
 pub const revoke_usage_text = "usage: ugrant revoke --profile <name>\n";
 pub const rekey_usage_text =
-    "usage: ugrant rekey [--backend <platform-secure-store|tpm2|passphrase> | --passphrase-env <NAME> | --passphrase-file <PATH> | --allow-insecure-keyfile]\n";
+    "usage: ugrant rekey [--backend <platform-secure-store|tpm2|passphrase> | --passphrase-env <NAME> | --passphrase-file <PATH> | --allow-insecure-keyfile | --secure-enclave [--require-user-presence]]\n";
 pub const status_usage_text = "usage: ugrant status [--profile <name>]\n";
 pub const doctor_usage_text = "usage: ugrant doctor\n";
 
@@ -69,7 +71,7 @@ test "usage strings include new profile list and subcommand help" {
     try std.testing.expect(std.mem.eql(u8, env_usage_text, "usage: ugrant env --profile <name> [--format shell|json]\n"));
     try std.testing.expect(std.mem.eql(u8, exec_usage_text, "usage: ugrant exec --profile <name> -- <cmd> [args...]\n"));
     try std.testing.expect(std.mem.eql(u8, revoke_usage_text, "usage: ugrant revoke --profile <name>\n"));
-    try std.testing.expect(std.mem.eql(u8, rekey_usage_text, "usage: ugrant rekey [--backend <platform-secure-store|tpm2|passphrase> | --passphrase-env <NAME> | --passphrase-file <PATH> | --allow-insecure-keyfile]\n"));
+    try std.testing.expect(std.mem.eql(u8, rekey_usage_text, "usage: ugrant rekey [--backend <platform-secure-store|tpm2|passphrase> | --passphrase-env <NAME> | --passphrase-file <PATH> | --allow-insecure-keyfile | --secure-enclave [--require-user-presence]]\n"));
     try std.testing.expect(std.mem.eql(u8, status_usage_text, "usage: ugrant status [--profile <name>]\n"));
     try std.testing.expect(std.mem.eql(u8, doctor_usage_text, "usage: ugrant doctor\n"));
 }
