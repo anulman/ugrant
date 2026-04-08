@@ -136,6 +136,16 @@ const MacOsKeychainRef = struct {
     key_version: u32,
 };
 
+fn backendProviderLabel(backend: []const u8) ?[]const u8 {
+    if (!std.mem.eql(u8, backend, "platform-secure-store")) return null;
+
+    return switch (builtin.os.tag) {
+        .macos => "macOS Keychain",
+        .windows => "Windows DPAPI",
+        else => "Secret Service",
+    };
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -234,7 +244,11 @@ fn cmdInit(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.
     try ensureSchema(db);
     try tightenSecretStatePermissions(paths);
 
-    try out.print("initialized: yes\nbackend: {s}\nkeys: {s}\ndb: {s}\n", .{ wrapped.backend, paths.keys_path, paths.db_path });
+    try out.print("initialized: yes\nbackend: {s}\n", .{wrapped.backend});
+    if (backendProviderLabel(wrapped.backend)) |provider| {
+        try out.print("backend_provider: {s}\n", .{provider});
+    }
+    try out.print("keys: {s}\ndb: {s}\n", .{ paths.keys_path, paths.db_path });
 }
 
 fn cmdProfile(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.Writer, err: *std.Io.Writer) !void {
@@ -768,9 +782,17 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     defer _ = c.sqlite3_close(db);
     const stats = try performRekey(allocator, db, paths.keys_path, wrapped, current_wrap_secret.secret, target_backend, target_wrap.secret, target_wrap.secret_ref, target_wrap.tpm2_pub_b64, target_wrap.tpm2_priv_b64);
     try tightenSecretStatePermissions(paths);
+    try out.print("rekey: ok\nbackend: {s}\n", .{target_backend});
+    if (backendProviderLabel(target_backend)) |provider| {
+        try out.print("backend_provider: {s}\n", .{provider});
+    }
+    try out.print("previous_backend: {s}\n", .{wrapped.backend});
+    if (backendProviderLabel(wrapped.backend)) |provider| {
+        try out.print("previous_backend_provider: {s}\n", .{provider});
+    }
     try out.print(
-        "rekey: ok\nbackend: {s}\nprevious_backend: {s}\nkey_version: {}\nprofiles_rewritten: {}\ngrants_rewritten: {}\n",
-        .{ target_backend, wrapped.backend, stats.key_version, stats.profiles_rewritten, stats.grants_rewritten },
+        "key_version: {}\nprofiles_rewritten: {}\ngrants_rewritten: {}\n",
+        .{ stats.key_version, stats.profiles_rewritten, stats.grants_rewritten },
     );
 }
 
@@ -825,7 +847,13 @@ fn cmdStatus(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
     const summary = try collectStatusSummary(allocator, paths);
     defer freeStatusSummary(allocator, summary);
 
-    try out.print("initialized: {s}\nconfig: {s}\nstate_dir: {s}\ndb: {s}\nkeys: {s}\nbackend: {s}\nsecurity_mode: {s}\nprofiles: {}\ngrants: {}\nstate: {s}\n", .{ if (summary.initialized) "yes" else "no", summary.config_path, summary.state_dir, summary.db_path, summary.keys_path, summary.backend orelse "none", summary.security_mode, summary.profile_count, summary.grant_count, summary.grant_state });
+    try out.print("initialized: {s}\nconfig: {s}\nstate_dir: {s}\ndb: {s}\nkeys: {s}\nbackend: {s}\n", .{ if (summary.initialized) "yes" else "no", summary.config_path, summary.state_dir, summary.db_path, summary.keys_path, summary.backend orelse "none" });
+    if (summary.backend) |backend| {
+        if (backendProviderLabel(backend)) |provider| {
+            try out.print("backend_provider: {s}\n", .{provider});
+        }
+    }
+    try out.print("security_mode: {s}\nprofiles: {}\ngrants: {}\nstate: {s}\n", .{ summary.security_mode, summary.profile_count, summary.grant_count, summary.grant_state });
 
     if (summary.initialized and profile_name != null) {
         const db = try openDb(paths.db_path);
@@ -861,6 +889,10 @@ fn cmdDoctor(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
     }
     const wrapped = try loadWrappedDek(allocator, paths.keys_path);
     defer freeWrappedDekRecord(allocator, wrapped);
+    try out.print("backend: {s}\n", .{wrapped.backend});
+    if (backendProviderLabel(wrapped.backend)) |provider| {
+        try out.print("backend_provider: {s}\n", .{provider});
+    }
     const dek = unwrapDek(allocator, wrapped) catch |e| switch (e) {
         error.InvalidWrappedDek => {
             if (builtin.os.tag == .macos and std.mem.eql(u8, wrapped.backend, "platform-secure-store")) {
@@ -883,7 +915,7 @@ fn cmdDoctor(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
     defer _ = c.sqlite3_close(db);
     try ensureSchema(db);
     try tightenSecretStatePermissions(paths);
-    try out.print("backend: {s}\ndek_unwrap: ok\nschema: ok\npermissions: ok\n", .{wrapped.backend});
+    try out.writeAll("dek_unwrap: ok\nschema: ok\npermissions: ok\n");
 }
 
 const TokenResponse = struct {
@@ -2691,6 +2723,20 @@ test "macos keychain secret refs are strict and versioned" {
     try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-store;account=wrong:7"));
     try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:"));
     try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:7;extra=x"));
+}
+
+test "platform secure store provider label matches the local OS" {
+    const provider = backendProviderLabel("platform-secure-store").?;
+
+    switch (builtin.os.tag) {
+        .macos => try std.testing.expectEqualStrings("macOS Keychain", provider),
+        .windows => try std.testing.expectEqualStrings("Windows DPAPI", provider),
+        else => try std.testing.expectEqualStrings("Secret Service", provider),
+    }
+
+    try std.testing.expect(backendProviderLabel("tpm2") == null);
+    try std.testing.expect(backendProviderLabel("passphrase") == null);
+    try std.testing.expect(backendProviderLabel("insecure-keyfile") == null);
 }
 
 test "legacy wrapped dek records remain readable" {
