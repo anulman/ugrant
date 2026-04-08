@@ -113,6 +113,17 @@ $envMap.PSObject.Properties | ForEach-Object {
 - Secret prompts are hidden in a normal Windows console.
 - Command surface stays the same on Windows: `ugrant init`, `ugrant profile add`, `ugrant login`, `ugrant exec`, `ugrant env`, `ugrant status`, `ugrant doctor`.
 
+## macOS notes
+
+- Config path: `~/.config/ugrant/config.toml`
+- State directory: `~/.local/state/ugrant/`
+- State files include `state.db` and wrapped key metadata under the state directory.
+- Backend selection: on macOS, `platform-secure-store` means the default login Keychain. The public backend name still remains `platform-secure-store`.
+- Provider detail: when that backend is active, `ugrant status` and `ugrant doctor` should print `backend_provider: macOS Keychain`.
+- Keychain storage: the wrapped DEK is stored as a generic-password item in the default login keychain, with service `dev.ugrant.platform-secure-store` and account `dek:<key_version>`.
+- Migration: there is no silent passphrase-to-Keychain migration. Use `ugrant rekey --backend platform-secure-store` when you want to move custody into Keychain.
+- QA: live Keychain coverage still requires manual validation on a real Mac. Use `bash scripts/manual-installer-qa-unix.sh`, then confirm the login-keychain item with Keychain Access or `security find-generic-password -s dev.ugrant.platform-secure-store ~/Library/Keychains/login.keychain-db`.
+
 ## Useful commands
 
 List or inspect state:

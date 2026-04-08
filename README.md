@@ -12,7 +12,7 @@ It keeps grant material local, encrypts secret fields at rest, refreshes access 
 
 Recent hardening includes Argon2id passphrase wrapping, 0700/0600 secret-state permissions on Unix, state-validated manual login fallback, concurrent refresh leasing, minisign-signed release archives with checksum fallback installs, and bundled SQLite builds across Linux, macOS, and Windows.
 
-On Linux, `platform-secure-store` uses Secret Service when available and still prefers TPM2 when present. On Windows, `platform-secure-store` now uses user-scoped DPAPI for local wrap-secret custody.
+On macOS, `platform-secure-store` uses the default login Keychain. On Linux, `platform-secure-store` uses Secret Service when available and still prefers TPM2 when present. On Windows, `platform-secure-store` now uses user-scoped DPAPI for local wrap-secret custody.
 
 ## What it does
 
@@ -89,6 +89,15 @@ irm https://www.ugrant.sh/install.ps1 | iex
 ```
 
 Both installers prefer minisign verification when `minisign` is available. If not, they fall back to the matching `.sha256` file with a blunt warning so older environments still work.
+
+## macOS notes
+
+- Config lives at `~/.config/ugrant/config.toml`. State lives at `~/.local/state/ugrant/` with `state.db` and wrapped key metadata.
+- `ugrant init` on macOS prefers `platform-secure-store`, which now means the default login Keychain. The public backend name stays `platform-secure-store`.
+- When that backend is active, `ugrant status` and `ugrant doctor` print `backend_provider: macOS Keychain`.
+- The wrapped DEK is stored as a login-keychain generic-password item with service `dev.ugrant.platform-secure-store` and account `dek:<key_version>`.
+- Existing passphrase or insecure installs are not silently migrated into Keychain. Move them explicitly with `ugrant rekey --backend platform-secure-store`.
+- Live Keychain validation still needs a real Mac. After rekey, confirm `status` and `doctor` look right, then inspect the login keychain with Keychain Access or `security find-generic-password -s dev.ugrant.platform-secure-store ~/Library/Keychains/login.keychain-db`.
 
 ## Windows notes
 
@@ -175,14 +184,14 @@ For live lifecycle checks against the built binary, use:
 - `bash scripts/qa-live-smoke.sh`
 - `pwsh -File .\scripts\qa-live-smoke.ps1`
 
-Those smoke scripts cover isolated-home init, status, doctor, profile add, and rekey transitions without needing a real OAuth login.
+Those smoke scripts cover isolated-home init, status, doctor, profile add, and rekey transitions without needing a real OAuth login. On macOS, they still use the test platform-store path rather than a live Keychain item.
 
 For manual installer QA against the public install endpoints, use:
 
 - `bash scripts/manual-installer-qa-unix.sh`
 - `pwsh -File .\scripts\manual-installer-qa-windows.ps1`
 
-Those installer scripts exercise fresh install, reinstall, repair-after-clobber, and basic post-install command checks in an isolated temp home/profile.
+Those installer scripts exercise fresh install, reinstall, repair-after-clobber, and basic post-install command checks in an isolated temp home/profile. On a real Mac, the Unix installer QA script also walks the explicit `rekey --backend platform-secure-store` path so you can verify `backend_provider: macOS Keychain` and the expected login-keychain item.
 
 ## Project files
 

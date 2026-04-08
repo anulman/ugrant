@@ -30,6 +30,13 @@ step "Add a profile record and verify it exists"
   --client-secret qa-client-secret
 "$BIN" profile list
 
+if [ "$(uname -s)" = "Darwin" ]; then
+  step "macOS only: rekey into login Keychain-backed platform-secure-store"
+  "$BIN" rekey --backend platform-secure-store
+  "$BIN" status
+  "$BIN" doctor
+fi
+
 step "Reinstall over the existing binary"
 sh "$TMPROOT/install.sh"
 "$BIN" status
@@ -48,3 +55,11 @@ Manual checks to record:
 - Did the repair step replace a broken binary with a working one?
 - Did status/doctor show sensible config and state paths?
 EOF
+
+if [ "$(uname -s)" = "Darwin" ]; then
+  cat <<EOF
+- On macOS, after `ugrant rekey --backend platform-secure-store`, did `status` / `doctor` report `backend: platform-secure-store` and `backend_provider: macOS Keychain`?
+- On macOS, did Keychain Access or `security find-generic-password -s dev.ugrant.platform-secure-store ~/Library/Keychains/login.keychain-db` show a login-keychain generic-password item with account `dek:<key_version>`?
+- On macOS, was the move into Keychain explicit, meaning nothing migrated before you ran `ugrant rekey --backend platform-secure-store`?
+EOF
+fi
