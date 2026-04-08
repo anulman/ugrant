@@ -47,24 +47,40 @@ fn getEnvVarOwned(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
     };
 }
 
-fn getHomeDir(allocator: std.mem.Allocator) ![]u8 {
-    if (try getEnvVarOwned(allocator, "HOME")) |home| return home;
+fn resolveHomeDirFromValues(
+    allocator: std.mem.Allocator,
+    is_windows: bool,
+    home: ?[]const u8,
+    userprofile: ?[]const u8,
+    homedrive: ?[]const u8,
+    homepath: ?[]const u8,
+) ![]u8 {
+    if (home) |value| return allocator.dupe(u8, value);
 
-    if (builtin.os.tag == .windows) {
-        if (try getEnvVarOwned(allocator, "USERPROFILE")) |profile| return profile;
-
-        const drive = try getEnvVarOwned(allocator, "HOMEDRIVE");
-        defer if (drive) |value| allocator.free(value);
-
-        const path = try getEnvVarOwned(allocator, "HOMEPATH");
-        defer if (path) |value| allocator.free(value);
-
-        if (drive) |drive_value| {
-            if (path) |path_value| return std.mem.concat(allocator, u8, &.{ drive_value, path_value });
+    if (is_windows) {
+        if (userprofile) |value| return allocator.dupe(u8, value);
+        if (homedrive) |drive| {
+            if (homepath) |path| return std.mem.concat(allocator, u8, &.{ drive, path });
         }
     }
 
     return error.MissingHome;
+}
+
+fn getHomeDir(allocator: std.mem.Allocator) ![]u8 {
+    const home = try getEnvVarOwned(allocator, "HOME");
+    defer if (home) |value| allocator.free(value);
+
+    const profile = try getEnvVarOwned(allocator, "USERPROFILE");
+    defer if (profile) |value| allocator.free(value);
+
+    const drive = try getEnvVarOwned(allocator, "HOMEDRIVE");
+    defer if (drive) |value| allocator.free(value);
+
+    const path = try getEnvVarOwned(allocator, "HOMEPATH");
+    defer if (path) |value| allocator.free(value);
+
+    return resolveHomeDirFromValues(allocator, builtin.os.tag == .windows, home, profile, drive, path);
 }
 
 fn envVarExists(name: []const u8) bool {
@@ -79,6 +95,10 @@ fn envVarExists(name: []const u8) bool {
 pub fn resolvePaths(allocator: std.mem.Allocator) !Paths {
     const home = try getHomeDir(allocator);
     defer allocator.free(home);
+    return resolvePathsFromHome(allocator, home);
+}
+
+fn resolvePathsFromHome(allocator: std.mem.Allocator, home: []const u8) !Paths {
     const config_path = try std.fs.path.join(allocator, &.{ home, config_rel_path });
     const state_dir = try std.fs.path.join(allocator, &.{ home, state_rel_dir });
     const db_path = try std.fs.path.join(allocator, &.{ state_dir, db_filename });
@@ -265,4 +285,46 @@ test "default backend selection still prefers strongest available backend" {
     try std.testing.expectEqualStrings("tpm2", try resolveBackendChoice(null, false, true, true));
     try std.testing.expectEqualStrings("platform-secure-store", try resolveBackendChoice(null, false, false, true));
     try std.testing.expectEqualStrings("passphrase", try resolveBackendChoice(null, false, false, false));
+}
+
+test "windows home dir resolution prefers USERPROFILE over HOMEDRIVE and HOMEPATH" {
+    if (builtin.os.tag != .windows) return;
+
+    const allocator = std.testing.allocator;
+
+    const from_profile = try resolveHomeDirFromValues(
+        allocator,
+        true,
+        null,
+        "C:\\Users\\Aidan",
+        "D:",
+        "\\Users\\Fallback",
+    );
+    defer allocator.free(from_profile);
+    try std.testing.expectEqualStrings("C:\\Users\\Aidan", from_profile);
+
+    const from_drive_path = try resolveHomeDirFromValues(
+        allocator,
+        true,
+        null,
+        null,
+        "D:",
+        "\\Users\\Fallback",
+    );
+    defer allocator.free(from_drive_path);
+    try std.testing.expectEqualStrings("D:\\Users\\Fallback", from_drive_path);
+
+    try std.testing.expectError(error.MissingHome, resolveHomeDirFromValues(allocator, true, null, null, "D:", null));
+}
+
+test "windows path resolution builds expected defaults from a supplied home dir" {
+    if (builtin.os.tag != .windows) return;
+
+    const paths = try resolvePathsFromHome(std.testing.allocator, "C:\\Users\\Aidan");
+    defer paths.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\.config\\ugrant\\config.toml", paths.config_path);
+    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\.local\\state\\ugrant", paths.state_dir);
+    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\.local\\state\\ugrant\\state.db", paths.db_path);
+    try std.testing.expectEqualStrings("C:\\Users\\Aidan\\.local\\state\\ugrant\\keys.json", paths.keys_path);
 }
