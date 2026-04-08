@@ -100,7 +100,12 @@ jobs:
           )
 
           foreach ($targetInfo in $targets) {
-            zig build -Doptimize=ReleaseSafe -Dtarget=$($targetInfo.zig)
+            $zigArgs = @(
+              'build'
+              '-Doptimize=ReleaseSafe'
+              "-Dtarget=$($targetInfo.zig)"
+            )
+            & zig @zigArgs
 
             $target = $targetInfo.archive
             $name = "ugrant-${{ github.event.inputs.tag }}-$target"
