@@ -85,6 +85,23 @@ ugrant login --profile gmail
 ugrant exec --profile gmail -- python sync_mail.py
 ```
 
+PowerShell example:
+
+```powershell
+ugrant exec --profile gmail -- python .\sync_mail.py
+```
+
+### 5. Use runtime env in PowerShell when needed
+
+`ugrant env` without a format flag prints shell exports. In PowerShell, prefer JSON:
+
+```powershell
+$envMap = ugrant env --profile gmail --format json | ConvertFrom-Json
+$envMap.PSObject.Properties | ForEach-Object {
+  Set-Item -Path "Env:$($_.Name)" -Value $_.Value
+}
+```
+
 ## Windows notes
 
 - Config path: `%USERPROFILE%\.config\ugrant\config.toml`
@@ -93,7 +110,7 @@ ugrant exec --profile gmail -- python sync_mail.py
 - Backend selection: on Windows, `ugrant init` should prefer `platform-secure-store`. Linux-only TPM2 guidance does not apply.
 - Login flow is not fully autonomous. During `ugrant login`, the human may still need to open the URL, approve scopes, and possibly paste a final redirect URL back into the terminal.
 - Secret prompts are hidden in a normal Windows console.
-- Command surface stays the same on Windows: `ugrant init`, `ugrant profile add`, `ugrant login`, `ugrant exec`, `ugrant status`, `ugrant doctor`.
+- Command surface stays the same on Windows: `ugrant init`, `ugrant profile add`, `ugrant login`, `ugrant exec`, `ugrant env`, `ugrant status`, `ugrant doctor`.
 
 ## Useful commands
 

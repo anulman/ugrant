@@ -99,6 +99,25 @@ Both installers prefer minisign verification when `minisign` is available. If no
 - The OAuth consent step is still a human checkpoint. `ugrant login` may open a browser flow or print a URL, and some providers may ask you to paste a final redirect URL back into the terminal.
 - Secret prompts are hidden in a normal Windows console, but OAuth consent is not bypassed or automated for you.
 
+### PowerShell examples
+
+Run a downstream command from PowerShell the same way you would elsewhere:
+
+```powershell
+ugrant exec --profile gmail -- python .\sync_mail.py
+```
+
+If you want to consume runtime env in PowerShell itself, prefer JSON output over POSIX-style exports:
+
+```powershell
+$envMap = ugrant env --profile gmail --format json | ConvertFrom-Json
+$envMap.PSObject.Properties | ForEach-Object {
+  Set-Item -Path "Env:$($_.Name)" -Value $_.Value
+}
+```
+
+That keeps the command surface the same, while making PowerShell automation less annoying.
+
 ## Verify a release manually
 
 ### Preferred: minisign
