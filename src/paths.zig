@@ -202,7 +202,7 @@ fn migrateStateDirIfNeeded(allocator: std.mem.Allocator, legacy: Paths, current:
         const legacy_exists = try fileExists(legacy.state_dir);
         const current_exists = try fileExists(current.state_dir);
         if (legacy_exists and !current_exists) {
-            if (std.fs.path.dirname(current.state_dir)) |parent| try std.fs.cwd().makePath(parent);
+            if (std.fs.path.dirname(current.state_dir)) |parent| try makePathCompat(parent);
             try std.fs.renameAbsolute(legacy.state_dir, current.state_dir);
             return;
         }
@@ -228,7 +228,7 @@ fn migratePathIfMissing(legacy_path: []const u8, current_path: []const u8) !void
     if (try fileExists(current_path)) return;
     if (!(try fileExists(legacy_path))) return;
 
-    if (std.fs.path.dirname(current_path)) |parent| try std.fs.cwd().makePath(parent);
+    if (std.fs.path.dirname(current_path)) |parent| try makePathCompat(parent);
     try std.fs.renameAbsolute(legacy_path, current_path);
 }
 
@@ -280,9 +280,41 @@ fn isWindowsSeparator(ch: u8) bool {
 }
 
 pub fn ensureParentDirs(paths: Paths) !void {
-    try std.fs.cwd().makePath(paths.state_dir);
-    if (std.fs.path.dirname(paths.config_path)) |config_dir| try std.fs.cwd().makePath(config_dir);
+    try makePathCompat(paths.state_dir);
+    if (std.fs.path.dirname(paths.config_path)) |config_dir| try makePathCompat(config_dir);
     try tightenSecretStatePermissions(paths);
+}
+
+fn makePathCompat(path: []const u8) !void {
+    if (path.len == 0) return;
+    if (builtin.os.tag != .windows or !std.fs.path.isAbsolute(path)) {
+        try std.fs.cwd().makePath(path);
+        return;
+    }
+
+    if (path.len < 3 or path[1] != ':' or !isWindowsSeparator(path[2])) {
+        try std.fs.cwd().makePath(path);
+        return;
+    }
+
+    var current = std.ArrayList(u8){};
+    defer current.deinit(std.heap.page_allocator);
+    try current.appendSlice(std.heap.page_allocator, path[0..3]);
+
+    var index: usize = 3;
+    while (index < path.len) {
+        while (index < path.len and isWindowsSeparator(path[index])) : (index += 1) {}
+        if (index >= path.len) break;
+
+        const start = index;
+        while (index < path.len and !isWindowsSeparator(path[index])) : (index += 1) {}
+        try current.appendSlice(std.heap.page_allocator, path[start..index]);
+        std.fs.makeDirAbsolute(current.items) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        if (index < path.len) try current.append(std.heap.page_allocator, '\\');
+    }
 }
 
 pub fn ensureConfig(config_path: []const u8) !void {
@@ -555,8 +587,8 @@ test "windows legacy path migration moves config and state when destinations are
     };
     defer current.deinit(allocator);
 
-    if (std.fs.path.dirname(legacy.config_path)) |parent| try std.fs.cwd().makePath(parent);
-    if (std.fs.path.dirname(legacy.db_path)) |parent| try std.fs.cwd().makePath(parent);
+    if (std.fs.path.dirname(legacy.config_path)) |parent| try makePathCompat(parent);
+    if (std.fs.path.dirname(legacy.db_path)) |parent| try makePathCompat(parent);
 
     {
         var file = try std.fs.createFileAbsolute(legacy.config_path, .{ .truncate = true });
@@ -613,10 +645,10 @@ test "windows legacy path migration does not clobber an existing AppData install
     };
     defer current.deinit(allocator);
 
-    if (std.fs.path.dirname(legacy.config_path)) |parent| try std.fs.cwd().makePath(parent);
-    if (std.fs.path.dirname(legacy.db_path)) |parent| try std.fs.cwd().makePath(parent);
-    if (std.fs.path.dirname(current.config_path)) |parent| try std.fs.cwd().makePath(parent);
-    if (std.fs.path.dirname(current.db_path)) |parent| try std.fs.cwd().makePath(parent);
+    if (std.fs.path.dirname(legacy.config_path)) |parent| try makePathCompat(parent);
+    if (std.fs.path.dirname(legacy.db_path)) |parent| try makePathCompat(parent);
+    if (std.fs.path.dirname(current.config_path)) |parent| try makePathCompat(parent);
+    if (std.fs.path.dirname(current.db_path)) |parent| try makePathCompat(parent);
 
     {
         var file = try std.fs.createFileAbsolute(legacy.config_path, .{ .truncate = true });
