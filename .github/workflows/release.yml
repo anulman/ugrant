@@ -26,6 +26,14 @@ jobs:
             archive_ext: zip
 
     runs-on: ${{ matrix.os }}
+    env:
+      APPLE_CODESIGN_P12_BASE64: ${{ secrets.APPLE_CODESIGN_P12_BASE64 }}
+      APPLE_CODESIGN_P12_PASSWORD: ${{ secrets.APPLE_CODESIGN_P12_PASSWORD }}
+      APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
 
     steps:
       - name: Check out
@@ -59,10 +67,7 @@ jobs:
         run: bash scripts/build-macos-helper.sh --release --out-dir dist/macos-helper
 
       - name: Import Apple signing certificate
-        if: runner.os == 'macOS' && secrets.APPLE_CODESIGN_P12_BASE64 != '' && secrets.APPLE_CODESIGN_P12_PASSWORD != ''
-        env:
-          APPLE_CODESIGN_P12_BASE64: ${{ secrets.APPLE_CODESIGN_P12_BASE64 }}
-          APPLE_CODESIGN_P12_PASSWORD: ${{ secrets.APPLE_CODESIGN_P12_PASSWORD }}
+        if: runner.os == 'macOS' && env.APPLE_CODESIGN_P12_BASE64 != '' && env.APPLE_CODESIGN_P12_PASSWORD != ''
         run: |
           set -euo pipefail
           KEYCHAIN_PATH="$RUNNER_TEMP/ugrant-signing.keychain-db"
@@ -77,13 +82,11 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
       - name: Sign macOS binaries
-        if: runner.os == 'macOS' && secrets.APPLE_CODESIGN_IDENTITY != ''
-        env:
-          APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+        if: runner.os == 'macOS' && env.APPLE_CODESIGN_IDENTITY != ''
         run: bash scripts/sign-macos-binaries.sh zig-out/bin/ugrant dist/macos-helper/ugrant-se-helper
 
       - name: Verify macOS signatures
-        if: runner.os == 'macOS' && secrets.APPLE_CODESIGN_IDENTITY != ''
+        if: runner.os == 'macOS' && env.APPLE_CODESIGN_IDENTITY != ''
         run: bash scripts/verify-macos-binaries.sh zig-out/bin/ugrant dist/macos-helper/ugrant-se-helper
 
       - name: Package release (Unix)
@@ -128,11 +131,7 @@ jobs:
           Compress-Archive -Path $pkgdir -DestinationPath $archive
 
       - name: Notarize macOS zip
-        if: runner.os == 'macOS' && secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_PASSWORD != ''
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        if: runner.os == 'macOS' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
         run: |
           tag="${{ inputs.tag }}"
           bash scripts/notarize-macos-archive.sh "dist/ugrant-${tag#v}-${{ matrix.target }}.zip"
@@ -140,8 +139,6 @@ jobs:
       - name: Generate checksums and signatures (Unix)
         if: runner.os != 'Windows'
         shell: bash
-        env:
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -156,8 +153,6 @@ jobs:
       - name: Generate checksums and signatures (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           Get-ChildItem dist -Filter *.zip | ForEach-Object {
             $archive = $_.FullName
