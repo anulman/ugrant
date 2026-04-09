@@ -56,6 +56,14 @@ jobs:
             brew install minisign
           fi
 
+      - name: Install Windows deps
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command minisign -ErrorAction SilentlyContinue)) {
+            choco install minisign -y
+          }
+
       - name: Run tests
         run: zig build test
 
@@ -84,10 +92,6 @@ jobs:
       - name: Sign macOS binaries
         if: runner.os == 'macOS' && env.APPLE_CODESIGN_IDENTITY != ''
         run: bash scripts/sign-macos-binaries.sh zig-out/bin/ugrant dist/macos-helper/ugrant-se-helper
-
-      - name: Verify macOS signatures
-        if: runner.os == 'macOS' && env.APPLE_CODESIGN_IDENTITY != ''
-        run: bash scripts/verify-macos-binaries.sh zig-out/bin/ugrant dist/macos-helper/ugrant-se-helper
 
       - name: Package release (Unix)
         if: runner.os != 'Windows'
@@ -135,6 +139,14 @@ jobs:
         run: |
           tag="${{ inputs.tag }}"
           bash scripts/notarize-macos-archive.sh "dist/ugrant-${tag#v}-${{ matrix.target }}.zip"
+
+      - name: Verify macOS signatures
+        if: runner.os == 'macOS' && env.APPLE_CODESIGN_IDENTITY != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
+        run: |
+          tag="${{ inputs.tag }}"
+          bash scripts/verify-macos-binaries.sh \
+            "dist/ugrant-${tag#v}-${{ matrix.target }}/bin/ugrant" \
+            "dist/ugrant-${tag#v}-${{ matrix.target }}/bin/ugrant-se-helper"
 
       - name: Generate checksums and signatures (Unix)
         if: runner.os != 'Windows'
