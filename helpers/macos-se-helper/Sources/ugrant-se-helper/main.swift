@@ -207,7 +207,7 @@ func sharedSecret(privateKey: SecKey, publicKey: SecKey) -> Data {
         fail("ECDH key exchange is not supported for this key", reason: "unavailable")
     }
     var error: Unmanaged<CFError>?
-    let params: [String: Any] = [kSecUseAuthenticationUI as String: kSecUseAuthenticationUIAllow]
+    let params: [CFString: Any] = [kSecUseAuthenticationUI: kSecUseAuthenticationUIAllow]
     guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params as CFDictionary, &error) as Data? else {
         let failure = secError(error)
         fail("key exchange failed: \(failure.message)", reason: failure.reason)
@@ -220,10 +220,10 @@ func wrapKey(privateKey: SecKey, publicKey: SecKey) -> SymmetricKey {
         fail("ECDH X9.63 SHA-256 key exchange is not supported for this key", reason: "unavailable")
     }
     var error: Unmanaged<CFError>?
-    let params: [String: Any] = [
-        kSecKeyKeyExchangeParameterRequestedSize as String: 32,
-        kSecKeyKeyExchangeParameterSharedInfo as String: wrapMaterialInfo,
-        kSecUseAuthenticationUI as String: kSecUseAuthenticationUIAllow,
+    let params: [CFString: Any] = [
+        kSecKeyKeyExchangeParameterRequestedSize: 32,
+        kSecKeyKeyExchangeParameterSharedInfo: wrapMaterialInfo,
+        kSecUseAuthenticationUI: kSecUseAuthenticationUIAllow,
     ]
     guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params as CFDictionary, &error) as Data? else {
         let failure = secError(error)
