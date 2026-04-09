@@ -1041,7 +1041,7 @@ fn wrapDekForBackend(allocator: std.mem.Allocator, backend: []const u8, key_vers
 
 fn unwrapDek(allocator: std.mem.Allocator, record: WrappedDekRecord) ![]u8 {
     const passphrase = try wrapSecretForBackend(allocator, record.backend, "Unlock ugrant passphrase: ", null, record.key_version, record);
-    defer freeSecret(allocator, passphrase.secret);
+    defer freeWrapSecret(allocator, passphrase);
 
     return unwrapDekWithSecret(allocator, record, passphrase.secret);
 }
