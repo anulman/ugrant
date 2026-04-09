@@ -134,7 +134,8 @@ function releaseTargetName(target) {
 }
 
 function installArtifactName(tag, target, kind) {
-  return `ugrant-${tag}-${releaseTargetName(target)}${archiveExtensionForTarget(target)}${INSTALL_KIND_SUFFIX[kind]}`;
+  const normalizedTag = String(tag).replace(/^v/, "");
+  return `ugrant-${normalizedTag}-${releaseTargetName(target)}${archiveExtensionForTarget(target)}${INSTALL_KIND_SUFFIX[kind]}`;
 }
 
 function normalizeTarget(target) {
