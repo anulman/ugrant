@@ -733,7 +733,6 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
 
     const wrapped = try loadWrappedDek(allocator, paths.keys_path);
     defer freeWrappedDekRecord(allocator, wrapped);
-    try out.print("ugrant rekey debug: loaded backend={s} key_version={} secret_ref={?s} require_user_presence={?}\n", .{ wrapped.backend, wrapped.key_version, wrapped.secret_ref, wrapped.require_user_presence });
 
     const current_wrap_secret = wrapSecretForBackend(allocator, wrapped.backend, "Current ugrant passphrase: ", paths.keys_path, wrapped.key_version, wrapped) catch |wrap_err| switch (wrap_err) {
         error.MacOsSecureEnclaveUserCancelled => {
@@ -833,11 +832,9 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     }
     defer freeWrapSecret(allocator, target_wrap);
 
-    try out.print("ugrant rekey debug: target_backend={s} target_secret_ref={?s} target_require_user_presence={}\n", .{ target_backend, target_wrap.secret_ref, target_wrap.require_user_presence });
     const db = try openDb(paths.db_path);
     defer _ = c.sqlite3_close(db);
     const stats = try performRekey(allocator, db, paths.keys_path, wrapped, current_wrap_secret.secret, target_backend, target_wrap.secret, target_wrap.secret_ref, target_wrap.tpm2_pub_b64, target_wrap.tpm2_priv_b64, target_wrap.secure_enclave_ephemeral_pub_b64, target_wrap.require_user_presence);
-    try out.print("ugrant rekey debug: performRekey returned key_version={} target_backend={s} target_secret_ref={?s}\n", .{ stats.key_version, target_backend, target_wrap.secret_ref });
     try tightenSecretStatePermissions(paths);
     const target_metadata = backendMetadata(target_backend, target_wrap.secret_ref, target_wrap.require_user_presence);
     const previous_metadata = backendMetadata(wrapped.backend, wrapped.secret_ref, wrapped.require_user_presence);
@@ -1996,38 +1993,6 @@ fn freeMacOsSecureEnclaveRefs(allocator: std.mem.Allocator, refs: []MacOsSecureE
     allocator.free(refs);
 }
 
-fn runMacOsSecureEnclaveHelperDetailed(allocator: std.mem.Allocator, argv: []const []const u8) !MacOsSecureEnclaveHelperResult {
-    var fallback_argv = std.ArrayList([]const u8){};
-    defer fallback_argv.deinit(allocator);
-    try fallback_argv.appendSlice(allocator, &.{ macos_xcrun_tool, "swift", "-" });
-    try fallback_argv.appendSlice(allocator, argv);
-    const result = runChildWithInput(allocator, fallback_argv.items, macos_secure_enclave_helper_script, 16 * 1024) catch return .{ .failure = .{ .reason = .unavailable, .message = try allocator.dupe(u8, "failed to launch inline xcrun swift secure enclave bridge") } };
-    defer allocator.free(result.stderr);
-    switch (result.term) {
-        .Exited => |code| if (code != 0) {
-            allocator.free(result.stdout);
-            return .{ .failure = parseMacOsSecureEnclaveFailureFromJson(allocator, result.stderr) orelse .{ .reason = .unavailable, .message = if (result.stderr.len > 0) try allocator.dupe(u8, std.mem.trim(u8, result.stderr, "\r\n\t ")) else null } };
-        },
-        else => {
-            allocator.free(result.stdout);
-            return .{ .failure = .{ .reason = .unavailable, .message = try allocator.dupe(u8, "secure enclave helper terminated unexpectedly") } };
-        },
-    }
-    defer allocator.free(result.stdout);
-    return .{ .success = try parseSecureEnclaveWrapSecretFromJson(allocator, result.stdout) };
-}
-
-fn runMacOsSecureEnclaveHelper(allocator: std.mem.Allocator, argv: []const []const u8) !WrapSecret {
-    const result = try runMacOsSecureEnclaveHelperDetailed(allocator, argv);
-    return switch (result) {
-        .success => |wrap| wrap,
-        .failure => |failure| {
-            defer freeMacOsSecureEnclaveFailure(allocator, failure);
-            return macOsSecureEnclaveFailureError(failure.reason);
-        },
-    };
-}
-
 fn createMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, key_version: u32, require_user_presence: bool) !MacOsSecureEnclaveHelperResult {
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) {
         const tag = try formatMacOsSecureEnclaveApplicationTag(allocator, key_version);
@@ -2166,37 +2131,8 @@ fn loadMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []cons
 }
 
 fn loadMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, secret_ref: []const u8, expected_key_version: u32, ephemeral_pub_b64: []const u8, require_user_presence: bool) !MacOsSecureEnclaveHelperResult {
-    const parsed = try parseMacOsSecureEnclaveSecretRef(secret_ref);
-    if (parsed.key_version != expected_key_version) return error.InvalidWrappedDek;
-
-    if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) {
-        const secret = loadSyntheticSecureEnclaveWrapSecret(allocator, parsed.label, ephemeral_pub_b64) catch |err| switch (err) {
-            error.WrapBackendUnavailable => try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_SECRET", "secure-enclave-test-secret"),
-            else => return err,
-        };
-        return .{ .success = .{
-            .secret = secret,
-            .secret_ref = try allocator.dupe(u8, secret_ref),
-            .secure_enclave_ephemeral_pub_b64 = try allocator.dupe(u8, ephemeral_pub_b64),
-            .require_user_presence = require_user_presence,
-        } };
-    }
-    if (builtin.os.tag != .macos) return .{ .failure = .{ .reason = .unavailable } };
-
-    const result = try runMacOsSecureEnclaveHelperDetailed(allocator, &.{ "load", parsed.label, ephemeral_pub_b64 });
-    return switch (result) {
-        .failure => |reason| .{ .failure = reason },
-        .success => |wrap| blk: {
-            var updated = wrap;
-            if (updated.secret_ref) |ref| allocator.free(ref);
-            updated.secret_ref = try allocator.dupe(u8, secret_ref);
-            if (updated.secure_enclave_ephemeral_pub_b64 == null) {
-                updated.secure_enclave_ephemeral_pub_b64 = try allocator.dupe(u8, ephemeral_pub_b64);
-            }
-            updated.require_user_presence = require_user_presence;
-            break :blk .{ .success = updated };
-        },
-    };
+    _ = expected_key_version;
+    return .{ .success = try loadMacOsSecureEnclaveSecret(allocator, secret_ref, 0, ephemeral_pub_b64, require_user_presence) };
 }
 
 fn unwrapMacOsSecureEnclaveDekForDoctor(allocator: std.mem.Allocator, record: WrappedDekRecord, out: *std.Io.Writer, err: *std.Io.Writer) ![]u8 {
@@ -2237,15 +2173,8 @@ fn unwrapMacOsSecureEnclaveDekForDoctor(allocator: std.mem.Allocator, record: Wr
 fn deleteMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []const u8) !void {
     const parsed = try parseMacOsSecureEnclaveSecretRef(secret_ref);
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return deleteSecureEnclaveTestBlob(allocator, parsed.label);
-    if (builtin.os.tag != .macos) return error.WrapBackendUnavailable;
-
-    const result = runChildWithInput(allocator, &.{ macos_xcrun_tool, "swift", "-", "delete", parsed.label }, macos_secure_enclave_helper_script, 4096) catch return error.WrapBackendUnavailable;
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    switch (result.term) {
-        .Exited => |code| if (code != 0) return error.WrapBackendUnavailable,
-        else => return error.WrapBackendUnavailable,
-    }
+    // CTK identities are currently left in place; rekey cleanup should not fail on missing delete support.
+    return;
 }
 
 fn cleanupPersistedWrapSecret(allocator: std.mem.Allocator, backend: []const u8, wrap: WrapSecret) !void {

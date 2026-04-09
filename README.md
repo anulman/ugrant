@@ -216,8 +216,9 @@ Those installer scripts exercise fresh install, reinstall, repair-after-clobber,
 For Secure Enclave mode, keep the manual gate on a real Mac separate from the Linux-host smoke scripts:
 
 1. Run `bash scripts/manual-installer-qa-unix.sh` on a real Mac, preferably Apple Silicon first.
-2. From that fresh install, run `ugrant rekey --secure-enclave`, then confirm `ugrant status` / `ugrant doctor` report `backend: platform-secure-store` and `backend_provider: macOS Secure Enclave`.
-3. If you intend to support local approval prompts, also run `ugrant rekey --secure-enclave --require-user-presence`, confirm `user_presence_required: yes`, and record both an approved access and a cancelled prompt. A cancelled prompt should now surface as its own explicit `doctor` failure.
+2. From that fresh install, run `ugrant rekey --secure-enclave`, then confirm `ugrant status` / `ugrant doctor` report `backend: macos-secure-enclave` and `backend_provider: macOS Secure Enclave`.
+3. Confirm the persisted ref in `keys.json` is CTK-backed (`macos-ctk-secure-enclave:label=...;hash=...`) and inspect identities with `sc_auth list-ctk-identities`.
+4. If you intend to support local approval prompts, also run `ugrant rekey --secure-enclave --require-user-presence`, confirm `user_presence_required: yes`, and record both an approved access and a cancelled prompt. A cancelled prompt should now surface as its own explicit `doctor` failure.
 4. Rekey back with `ugrant rekey --backend platform-secure-store` and confirm the install returns to plain `backend_provider: macOS Keychain`.
 
 Release-readiness for any broader rollout should mean at least one recorded Apple Silicon pass for that Keychain -> Secure Enclave -> Keychain round-trip, plus docs that still describe Secure Enclave as explicit opt-in rather than the default macOS path.

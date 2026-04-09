@@ -419,8 +419,7 @@ pub fn commandExists(allocator: std.mem.Allocator, name: []const u8) bool {
 fn macOsSecureEnclaveAvailable(allocator: std.mem.Allocator) bool {
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return true;
     if (builtin.os.tag != .macos) return false;
-    if (commandExists(allocator, "ugrant-se-helper")) return true;
-    return commandExists(allocator, "xcrun");
+    return commandExists(allocator, "sc_auth");
 }
 
 pub fn backendAvailable(allocator: std.mem.Allocator, backend: []const u8) bool {
