@@ -710,11 +710,15 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
         if (backend_override) |backend| {
             if (!std.mem.eql(u8, backend, "macos-secure-enclave")) {
                 try err.writeAll("ugrant rekey: --secure-enclave only works with --backend macos-secure-enclave\n");
+                try out.flush();
+                try err.flush();
                 std.process.exit(2);
             }
         }
         if (!secureEnclaveAvailable(allocator)) {
             try err.writeAll("ugrant rekey: macOS Secure Enclave requested but unavailable on this system\n");
+            try out.flush();
+            try err.flush();
             std.process.exit(1);
         }
     }
@@ -788,6 +792,8 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
             .failure => |failure| {
                 defer freeMacOsSecureEnclaveFailure(allocator, failure);
                 try writeMacOsSecureEnclaveFailure(err, "rekey", failure);
+                try out.flush();
+                try err.flush();
                 std.process.exit(1);
             },
         };
