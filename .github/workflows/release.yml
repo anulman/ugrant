@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@34e114876b0b11c390a56381ad16eb3b2b5c8dc0
+        uses: actions/checkout@v4
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
@@ -184,7 +184,7 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@34e114876b0b11c390a56381ad16eb3b2b5c8dc0
+        uses: actions/checkout@v4
 
       - name: Download artifacts
         uses: actions/download-artifact@b14ec391df56b7c48877f6f6dd0e60e1d1f8fbb0

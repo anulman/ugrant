@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@34e114876b0b11c390a56381ad16eb3b2b5c8dc0
+        uses: actions/checkout@v4
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
