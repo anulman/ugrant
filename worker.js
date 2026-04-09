@@ -1,7 +1,7 @@
 const GITHUB_REPO = "https://github.com/anulman/ugrant";
 const GITHUB_API_LATEST = "https://api.github.com/repos/anulman/ugrant/releases/latest";
 const WWW_HOST = "www.ugrant.sh";
-const SUPPORTED_TARGETS = new Set(["linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64", "windows-x86_64", "windows-arm64"]);
+const SUPPORTED_TARGETS = new Set(["linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64", "macos-aarch64", "aarch64-macos", "x86_64-macos", "x86_64-linux", "aarch64-linux", "x86_64-windows", "arm64-windows", "windows-x86_64", "windows-arm64"]);
 const MINISIGN_PUBLIC_KEY_COMMENT = "minisign public key ADE231D30D7F9A88";
 const MINISIGN_PUBLIC_KEY = "RWSImn8N0zHirfQkjOQrSx6b2rD6o7rTjiEnoqyeygZ0PKQ1Tcs4CG+S";
 const MINISIGN_PUBLIC_KEY_FILE = `untrusted comment: ${MINISIGN_PUBLIC_KEY_COMMENT}\n${MINISIGN_PUBLIC_KEY}\n`;
@@ -138,7 +138,24 @@ function installArtifactName(tag, target, kind) {
 }
 
 function normalizeTarget(target) {
-  return SUPPORTED_TARGETS.has(target) ? target : null;
+  if (!SUPPORTED_TARGETS.has(target)) return null;
+  switch (target) {
+    case "aarch64-macos":
+    case "macos-aarch64":
+      return "macos-arm64";
+    case "x86_64-macos":
+      return "macos-x86_64";
+    case "x86_64-linux":
+      return "linux-x86_64";
+    case "aarch64-linux":
+      return "linux-aarch64";
+    case "x86_64-windows":
+      return "windows-x86_64";
+    case "arm64-windows":
+      return "windows-arm64";
+    default:
+      return target;
+  }
 }
 
 function pickRequestedArtifact(userAgent) {
