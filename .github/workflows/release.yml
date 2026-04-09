@@ -69,7 +69,8 @@ jobs:
         run: zig build test
 
       - name: Build release binary
-        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -Dversion=${{ inputs.tag }}
+        shell: bash
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} "-Dversion=${{ inputs.tag }}"
 
       - name: Build macOS Secure Enclave helper
         if: runner.os == 'macOS'
