@@ -152,9 +152,14 @@ const MacOsSecureEnclaveFailureReason = enum {
     access_denied,
 };
 
+const MacOsSecureEnclaveFailure = struct {
+    reason: MacOsSecureEnclaveFailureReason,
+    message: ?[]u8 = null,
+};
+
 const MacOsSecureEnclaveHelperResult = union(enum) {
     success: WrapSecret,
-    failure: MacOsSecureEnclaveFailureReason,
+    failure: MacOsSecureEnclaveFailure,
 };
 
 const WrapBackendOptions = wrapped_backend.WrapBackendOptions;
@@ -723,15 +728,15 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
 
     const current_wrap_secret = wrapSecretForBackend(allocator, wrapped.backend, "Current ugrant passphrase: ", paths.keys_path, wrapped.key_version, wrapped) catch |wrap_err| switch (wrap_err) {
         error.MacOsSecureEnclaveUserCancelled => {
-            try writeMacOsSecureEnclaveFailure(err, "rekey", .user_cancelled);
+            try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .user_cancelled });
             std.process.exit(1);
         },
         error.MacOsSecureEnclaveKeyMissing => {
-            try writeMacOsSecureEnclaveFailure(err, "rekey", .key_missing);
+            try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .key_missing });
             std.process.exit(1);
         },
         error.MacOsSecureEnclaveAccessDenied => {
-            try writeMacOsSecureEnclaveFailure(err, "rekey", .access_denied);
+            try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .access_denied });
             std.process.exit(1);
         },
         else => return wrap_err,
@@ -759,15 +764,15 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
         } else {
             target_wrap = wrapSecretForBackendWithOptions(allocator, target_backend, "", paths.keys_path, wrapped.key_version + 1, null, target_wrap_options) catch |wrap_err| switch (wrap_err) {
                 error.MacOsSecureEnclaveUserCancelled => {
-                    try writeMacOsSecureEnclaveFailure(err, "rekey", .user_cancelled);
+                    try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .user_cancelled });
                     std.process.exit(1);
                 },
                 error.MacOsSecureEnclaveKeyMissing => {
-                    try writeMacOsSecureEnclaveFailure(err, "rekey", .key_missing);
+                    try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .key_missing });
                     std.process.exit(1);
                 },
                 error.MacOsSecureEnclaveAccessDenied => {
-                    try writeMacOsSecureEnclaveFailure(err, "rekey", .access_denied);
+                    try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .access_denied });
                     std.process.exit(1);
                 },
                 else => return wrap_err,
@@ -778,15 +783,15 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
         target_wrap_options = wrap_options;
         target_wrap = wrapSecretForBackendWithOptions(allocator, target_backend, "", paths.keys_path, wrapped.key_version + 1, null, target_wrap_options) catch |wrap_err| switch (wrap_err) {
             error.MacOsSecureEnclaveUserCancelled => {
-                try writeMacOsSecureEnclaveFailure(err, "rekey", .user_cancelled);
+                try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .user_cancelled });
                 std.process.exit(1);
             },
             error.MacOsSecureEnclaveKeyMissing => {
-                try writeMacOsSecureEnclaveFailure(err, "rekey", .key_missing);
+                try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .key_missing });
                 std.process.exit(1);
             },
             error.MacOsSecureEnclaveAccessDenied => {
-                try writeMacOsSecureEnclaveFailure(err, "rekey", .access_denied);
+                try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .access_denied });
                 std.process.exit(1);
             },
             else => return wrap_err,
@@ -807,15 +812,15 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     } else {
         target_wrap = wrapSecretForBackendWithOptions(allocator, wrapped.backend, "", paths.keys_path, wrapped.key_version + 1, null, target_wrap_options) catch |wrap_err| switch (wrap_err) {
             error.MacOsSecureEnclaveUserCancelled => {
-                try writeMacOsSecureEnclaveFailure(err, "rekey", .user_cancelled);
+                try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .user_cancelled });
                 std.process.exit(1);
             },
             error.MacOsSecureEnclaveKeyMissing => {
-                try writeMacOsSecureEnclaveFailure(err, "rekey", .key_missing);
+                try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .key_missing });
                 std.process.exit(1);
             },
             error.MacOsSecureEnclaveAccessDenied => {
-                try writeMacOsSecureEnclaveFailure(err, "rekey", .access_denied);
+                try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .access_denied });
                 std.process.exit(1);
             },
             else => return wrap_err,
@@ -1922,13 +1927,18 @@ fn parseMacOsSecureEnclaveFailureReason(reason_text: []const u8) ?MacOsSecureEnc
     return null;
 }
 
-fn parseMacOsSecureEnclaveFailureReasonFromJson(allocator: std.mem.Allocator, stderr: []const u8) ?MacOsSecureEnclaveFailureReason {
+fn parseMacOsSecureEnclaveFailureFromJson(allocator: std.mem.Allocator, stderr: []const u8) ?MacOsSecureEnclaveFailure {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, stderr, .{}) catch return null;
     defer parsed.deinit();
     const obj = parsed.value.object;
     const reason = obj.get("reason") orelse return null;
     if (reason != .string) return null;
-    return parseMacOsSecureEnclaveFailureReason(reason.string);
+    const parsed_reason = parseMacOsSecureEnclaveFailureReason(reason.string) orelse return null;
+    const message = if (obj.get("message")) |value|
+        if (value == .string) allocator.dupe(u8, value.string) catch null else null
+    else
+        null;
+    return .{ .reason = parsed_reason, .message = message };
 }
 
 fn macOsSecureEnclaveDoctorFailureMessage(reason: MacOsSecureEnclaveFailureReason) []const u8 {
@@ -1949,12 +1959,19 @@ fn macOsSecureEnclaveFailureError(reason: MacOsSecureEnclaveFailureReason) anyer
     };
 }
 
-fn writeMacOsSecureEnclaveFailure(err: *std.Io.Writer, command_name: []const u8, reason: MacOsSecureEnclaveFailureReason) !void {
-    switch (reason) {
+fn freeMacOsSecureEnclaveFailure(allocator: std.mem.Allocator, failure: MacOsSecureEnclaveFailure) void {
+    if (failure.message) |message| allocator.free(message);
+}
+
+fn writeMacOsSecureEnclaveFailure(err: *std.Io.Writer, command_name: []const u8, failure: MacOsSecureEnclaveFailure) !void {
+    switch (failure.reason) {
         .user_cancelled => try err.print("ugrant {s}: macOS Secure Enclave prompt was cancelled\n", .{command_name}),
         .unavailable => try err.print("ugrant {s}: macOS Secure Enclave is unavailable or helper execution failed\n", .{command_name}),
         .key_missing => try err.print("ugrant {s}: macOS Secure Enclave key is missing\n", .{command_name}),
         .access_denied => try err.print("ugrant {s}: macOS Secure Enclave key is inaccessible (access denied)\n", .{command_name}),
+    }
+    if (failure.message) |message| {
+        try err.print("ugrant {s}: helper detail: {s}\n", .{ command_name, message });
     }
 }
 
@@ -1966,24 +1983,24 @@ fn runMacOsSecureEnclaveHelperDetailed(allocator: std.mem.Allocator, argv: []con
             defer helper_argv.deinit(allocator);
             try helper_argv.append(allocator, helper_path);
             try helper_argv.appendSlice(allocator, argv);
-            break :blk runChildWithInput(allocator, helper_argv.items, "", 16 * 1024) catch return .{ .failure = .unavailable };
+            break :blk runChildWithInput(allocator, helper_argv.items, "", 16 * 1024) catch return .{ .failure = .{ .reason = .unavailable, .message = try allocator.dupe(u8, "failed to spawn secure enclave helper") } };
         }
 
         var fallback_argv = std.ArrayList([]const u8){};
         defer fallback_argv.deinit(allocator);
         try fallback_argv.appendSlice(allocator, &.{ macos_xcrun_tool, "swift", "-" });
         try fallback_argv.appendSlice(allocator, argv);
-        break :blk runChildWithInput(allocator, fallback_argv.items, macos_secure_enclave_helper_script, 16 * 1024) catch return .{ .failure = .unavailable };
+        break :blk runChildWithInput(allocator, fallback_argv.items, macos_secure_enclave_helper_script, 16 * 1024) catch return .{ .failure = .{ .reason = .unavailable, .message = try allocator.dupe(u8, "failed to launch xcrun swift secure enclave helper fallback") } };
     };
     defer allocator.free(result.stderr);
     switch (result.term) {
         .Exited => |code| if (code != 0) {
             allocator.free(result.stdout);
-            return .{ .failure = parseMacOsSecureEnclaveFailureReasonFromJson(allocator, result.stderr) orelse .unavailable };
+            return .{ .failure = parseMacOsSecureEnclaveFailureFromJson(allocator, result.stderr) orelse .{ .reason = .unavailable, .message = if (result.stderr.len > 0) try allocator.dupe(u8, std.mem.trim(u8, result.stderr, "\r\n\t ")) else null } };
         },
         else => {
             allocator.free(result.stdout);
-            return .{ .failure = .unavailable };
+            return .{ .failure = .{ .reason = .unavailable, .message = try allocator.dupe(u8, "secure enclave helper terminated unexpectedly") } };
         },
     }
     defer allocator.free(result.stdout);
