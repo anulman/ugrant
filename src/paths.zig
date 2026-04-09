@@ -416,6 +416,13 @@ pub fn commandExists(allocator: std.mem.Allocator, name: []const u8) bool {
     };
 }
 
+fn macOsSecureEnclaveAvailable(allocator: std.mem.Allocator) bool {
+    if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return true;
+    if (builtin.os.tag != .macos) return false;
+    if (commandExists(allocator, "ugrant-se-helper")) return true;
+    return commandExists(allocator, "xcrun");
+}
+
 pub fn backendAvailable(allocator: std.mem.Allocator, backend: []const u8) bool {
     if (std.mem.eql(u8, backend, "tpm2")) {
         if (envTruthy("UGRANT_TEST_TPM2_AVAILABLE")) return true;
@@ -426,6 +433,7 @@ pub fn backendAvailable(allocator: std.mem.Allocator, backend: []const u8) bool 
         if (builtin.os.tag == .windows or builtin.os.tag == .macos) return true;
         return commandExists(allocator, "secret-tool") and envVarExists("DBUS_SESSION_BUS_ADDRESS");
     }
+    if (std.mem.eql(u8, backend, "macos-secure-enclave")) return macOsSecureEnclaveAvailable(allocator);
     if (std.mem.eql(u8, backend, "passphrase")) return true;
     if (std.mem.eql(u8, backend, "insecure-keyfile")) return true;
     return false;
@@ -437,11 +445,15 @@ pub fn resolvePlatformSecureStoreBackend(tpm2_available: bool, platform_store_av
     return error.WrapBackendUnavailable;
 }
 
-pub fn resolveBackendChoice(requested_backend: ?[]const u8, allow_insecure: bool, tpm2_available: bool, platform_store_available: bool) ![]const u8 {
+pub fn resolveBackendChoice(requested_backend: ?[]const u8, allow_insecure: bool, tpm2_available: bool, platform_store_available: bool, macos_secure_enclave_available: bool) ![]const u8 {
     if (requested_backend) |backend| {
         if (std.mem.eql(u8, backend, "insecure-keyfile")) {
             if (!allow_insecure) return error.InsecureBackendRequiresOptIn;
             return "insecure-keyfile";
+        }
+        if (std.mem.eql(u8, backend, "macos-secure-enclave")) {
+            if (!macos_secure_enclave_available) return error.WrapBackendUnavailable;
+            return "macos-secure-enclave";
         }
         if (std.mem.eql(u8, backend, "platform-secure-store")) return resolvePlatformSecureStoreBackend(tpm2_available, platform_store_available);
         if (std.mem.eql(u8, backend, "tpm2")) {
@@ -453,12 +465,13 @@ pub fn resolveBackendChoice(requested_backend: ?[]const u8, allow_insecure: bool
     }
 
     if (tpm2_available) return "tpm2";
+    if (macos_secure_enclave_available) return "macos-secure-enclave";
     if (platform_store_available) return "platform-secure-store";
     return "passphrase";
 }
 
 pub fn chooseInitBackend(allocator: std.mem.Allocator, requested_backend: ?[]const u8, allow_insecure: bool) ![]const u8 {
-    return resolveBackendChoice(requested_backend, allow_insecure, backendAvailable(allocator, "tpm2"), backendAvailable(allocator, "platform-secure-store"));
+    return resolveBackendChoice(requested_backend, allow_insecure, backendAvailable(allocator, "tpm2"), backendAvailable(allocator, "platform-secure-store"), backendAvailable(allocator, "macos-secure-enclave"));
 }
 
 test "choose init backend respects explicit backend and insecure opt-in" {
@@ -470,9 +483,9 @@ test "choose init backend respects explicit backend and insecure opt-in" {
 test "platform-secure-store resolves to strongest Linux backend" {
     if (builtin.os.tag != .linux) return;
 
-    try std.testing.expectEqualStrings("tpm2", try resolveBackendChoice("platform-secure-store", false, true, true));
-    try std.testing.expectEqualStrings("platform-secure-store", try resolveBackendChoice("platform-secure-store", false, false, true));
-    try std.testing.expectError(error.WrapBackendUnavailable, resolveBackendChoice("platform-secure-store", false, false, false));
+    try std.testing.expectEqualStrings("tpm2", try resolveBackendChoice("platform-secure-store", false, true, true, false));
+    try std.testing.expectEqualStrings("platform-secure-store", try resolveBackendChoice("platform-secure-store", false, false, true, false));
+    try std.testing.expectError(error.WrapBackendUnavailable, resolveBackendChoice("platform-secure-store", false, false, false, false));
 }
 
 test "platform secure store is always available on windows" {
@@ -486,13 +499,15 @@ test "platform secure store is always available on macos" {
     if (builtin.os.tag != .macos) return;
 
     try std.testing.expect(backendAvailable(std.testing.allocator, "platform-secure-store"));
-    try std.testing.expectEqualStrings("platform-secure-store", try chooseInitBackend(std.testing.allocator, null, false));
+    const expected = if (backendAvailable(std.testing.allocator, "macos-secure-enclave")) "macos-secure-enclave" else "platform-secure-store";
+    try std.testing.expectEqualStrings(expected, try chooseInitBackend(std.testing.allocator, null, false));
 }
 
 test "default backend selection still prefers strongest available backend" {
-    try std.testing.expectEqualStrings("tpm2", try resolveBackendChoice(null, false, true, true));
-    try std.testing.expectEqualStrings("platform-secure-store", try resolveBackendChoice(null, false, false, true));
-    try std.testing.expectEqualStrings("passphrase", try resolveBackendChoice(null, false, false, false));
+    try std.testing.expectEqualStrings("tpm2", try resolveBackendChoice(null, false, true, true, true));
+    try std.testing.expectEqualStrings("macos-secure-enclave", try resolveBackendChoice(null, false, false, true, true));
+    try std.testing.expectEqualStrings("platform-secure-store", try resolveBackendChoice(null, false, false, true, false));
+    try std.testing.expectEqualStrings("passphrase", try resolveBackendChoice(null, false, false, false, false));
 }
 
 test "windows home dir resolution prefers USERPROFILE over HOMEDRIVE and HOMEPATH" {

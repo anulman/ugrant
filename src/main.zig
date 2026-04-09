@@ -249,14 +249,19 @@ fn cmdInit(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.
         }
     }
 
+    if (requested_backend) |backend| {
+        if (std.mem.eql(u8, backend, "macos-secure-enclave")) {
+            wrap_options.secure_enclave = true;
+        }
+    }
     if (wrap_options.require_user_presence and !wrap_options.secure_enclave) {
         try err.writeAll("ugrant init: --require-user-presence only works with --secure-enclave\n");
         std.process.exit(2);
     }
     if (wrap_options.secure_enclave) {
         if (requested_backend) |backend| {
-            if (!std.mem.eql(u8, backend, "platform-secure-store")) {
-                try err.writeAll("ugrant init: --secure-enclave only works with --backend platform-secure-store\n");
+            if (!std.mem.eql(u8, backend, "macos-secure-enclave")) {
+                try err.writeAll("ugrant init: --secure-enclave only works with --backend macos-secure-enclave\n");
                 std.process.exit(2);
             }
         }
@@ -264,7 +269,7 @@ fn cmdInit(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.
             try err.writeAll("ugrant init: macOS Secure Enclave requested but unavailable on this system\n");
             std.process.exit(1);
         }
-        requested_backend = "platform-secure-store";
+        requested_backend = "macos-secure-enclave";
     }
 
     const paths = try resolvePaths(allocator);
@@ -683,6 +688,11 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
         try err.writeAll("ugrant rekey: choose either passphrase wrap or --allow-insecure-keyfile, not both\n");
         std.process.exit(2);
     }
+    if (backend_override) |backend| {
+        if (std.mem.eql(u8, backend, "macos-secure-enclave")) {
+            wrap_options.secure_enclave = true;
+        }
+    }
     if (wrap_options.require_user_presence and !wrap_options.secure_enclave) {
         try err.writeAll("ugrant rekey: --require-user-presence only works with --secure-enclave\n");
         std.process.exit(2);
@@ -693,8 +703,8 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
             std.process.exit(2);
         }
         if (backend_override) |backend| {
-            if (!std.mem.eql(u8, backend, "platform-secure-store")) {
-                try err.writeAll("ugrant rekey: --secure-enclave only works with --backend platform-secure-store\n");
+            if (!std.mem.eql(u8, backend, "macos-secure-enclave")) {
+                try err.writeAll("ugrant rekey: --secure-enclave only works with --backend macos-secure-enclave\n");
                 std.process.exit(2);
             }
         }
@@ -738,10 +748,10 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
         target_wrap_options = .{};
     } else if (backend_override) |backend| {
         if (wrap_options.secure_enclave) {
-            target_backend = "platform-secure-store";
+            target_backend = "macos-secure-enclave";
             target_wrap_options = wrap_options;
         } else {
-            target_backend = try resolveBackendChoice(backend, false, backendAvailable(allocator, "tpm2"), backendAvailable(allocator, "platform-secure-store"));
+            target_backend = try resolveBackendChoice(backend, false, backendAvailable(allocator, "tpm2"), backendAvailable(allocator, "platform-secure-store"), backendAvailable(allocator, "macos-secure-enclave"));
             target_wrap_options = .{};
         }
         if (std.mem.eql(u8, target_backend, "passphrase")) {
@@ -764,7 +774,7 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
             };
         }
     } else if (wrap_options.secure_enclave) {
-        target_backend = "platform-secure-store";
+        target_backend = "macos-secure-enclave";
         target_wrap_options = wrap_options;
         target_wrap = wrapSecretForBackendWithOptions(allocator, target_backend, "", paths.keys_path, wrapped.key_version + 1, null, target_wrap_options) catch |wrap_err| switch (wrap_err) {
             error.MacOsSecureEnclaveUserCancelled => {
@@ -925,7 +935,7 @@ fn cmdDoctor(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
     const metadata = backendMetadata(wrapped.backend, wrapped.secret_ref, wrapped.require_user_presence);
     try out.print("backend: {s}\n", .{wrapped.backend});
     try writeBackendMetadataLines(out, metadata, "");
-    if (std.mem.eql(u8, wrapped.backend, "platform-secure-store") and isMacOsSecureEnclaveRecord(wrapped)) {
+    if (std.mem.eql(u8, wrapped.backend, "macos-secure-enclave")) {
         const dek = try unwrapMacOsSecureEnclaveDekForDoctor(allocator, wrapped, err);
         defer allocator.free(dek);
 
@@ -944,6 +954,10 @@ fn cmdDoctor(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
                     std.process.exit(1);
                 }
             }
+            if (std.mem.eql(u8, wrapped.backend, "macos-secure-enclave")) {
+                try err.writeAll("doctor: macOS Secure Enclave key reference is invalid\n");
+                std.process.exit(1);
+            }
             return e;
         },
         error.WrapBackendUnavailable => {
@@ -952,6 +966,10 @@ fn cmdDoctor(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
                     try err.writeAll("doctor: macOS Keychain item missing or inaccessible\n");
                     std.process.exit(1);
                 }
+            }
+            if (std.mem.eql(u8, wrapped.backend, "macos-secure-enclave")) {
+                try err.writeAll("doctor: macOS Secure Enclave key is missing\n");
+                std.process.exit(1);
             }
             return e;
         },
@@ -1034,8 +1052,8 @@ fn backendAvailable(allocator: std.mem.Allocator, backend: []const u8) bool {
     return pathing.backendAvailable(allocator, backend);
 }
 
-fn resolveBackendChoice(requested_backend: ?[]const u8, allow_insecure: bool, tpm2_available: bool, platform_store_available: bool) ![]const u8 {
-    return pathing.resolveBackendChoice(requested_backend, allow_insecure, tpm2_available, platform_store_available);
+fn resolveBackendChoice(requested_backend: ?[]const u8, allow_insecure: bool, tpm2_available: bool, platform_store_available: bool, macos_secure_enclave_available: bool) ![]const u8 {
+    return pathing.resolveBackendChoice(requested_backend, allow_insecure, tpm2_available, platform_store_available, macos_secure_enclave_available);
 }
 
 fn chooseInitBackend(allocator: std.mem.Allocator, requested_backend: ?[]const u8, allow_insecure: bool) ![]const u8 {
@@ -1047,7 +1065,7 @@ fn initOrLoadKeys(allocator: std.mem.Allocator, keys_path: []const u8, requested
 
     const backend = if (options.secure_enclave) blk: {
         if (!secureEnclaveAvailable(allocator)) return error.WrapBackendUnavailable;
-        break :blk "platform-secure-store";
+        break :blk "macos-secure-enclave";
     } else try chooseInitBackend(allocator, requested_backend, allow_insecure);
     const wrap_secret = try wrapSecretForBackendWithOptions(allocator, backend, "Create passphrase for ugrant: ", keys_path, 1, null, options);
     defer freeWrapSecret(allocator, wrap_secret);
@@ -1131,6 +1149,7 @@ fn wrapSecretForBackendWithOptions(allocator: std.mem.Allocator, backend: []cons
     if (std.mem.eql(u8, backend, "insecure-keyfile")) return .{ .secret = try allocator.dupe(u8, "insecure-local-keyfile") };
     if (std.mem.eql(u8, backend, "passphrase")) return .{ .secret = try promptSecret(allocator, prompt) };
     if (std.mem.eql(u8, backend, "platform-secure-store")) return platformStoreWrapSecret(allocator, keys_path, key_version, record, options);
+    if (std.mem.eql(u8, backend, "macos-secure-enclave")) return macOsSecureEnclaveWrapSecret(allocator, key_version, record, options);
     if (std.mem.eql(u8, backend, "tpm2")) return tpm2WrapSecret(allocator, record);
     return error.UnsupportedWrapBackend;
 }
@@ -2130,7 +2149,7 @@ fn deleteMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []co
 }
 
 fn cleanupPersistedWrapSecret(allocator: std.mem.Allocator, backend: []const u8, wrap: WrapSecret) !void {
-    if (!std.mem.eql(u8, backend, "platform-secure-store")) return;
+    if (!std.mem.eql(u8, backend, "platform-secure-store") and !std.mem.eql(u8, backend, "macos-secure-enclave")) return;
     const secret_ref = wrap.secret_ref orelse return;
     if (isMacOsSecureEnclaveSecretRef(secret_ref)) try deleteMacOsSecureEnclaveSecret(allocator, secret_ref);
 }
@@ -2269,6 +2288,15 @@ fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8,
         else => return error.WrapBackendUnavailable,
     }
     return .{ .secret = secret, .secret_ref = ref };
+}
+
+fn macOsSecureEnclaveWrapSecret(allocator: std.mem.Allocator, key_version: ?u32, record: ?WrappedDekRecord, options: WrapBackendOptions) !WrapSecret {
+    if (record) |existing| {
+        const secret_ref = existing.secret_ref orelse return error.InvalidWrappedDek;
+        const ephemeral_pub_b64 = existing.secure_enclave_ephemeral_pub_b64 orelse return error.InvalidWrappedDek;
+        return loadMacOsSecureEnclaveSecret(allocator, secret_ref, existing.key_version, ephemeral_pub_b64, existing.require_user_presence orelse false);
+    }
+    return createMacOsSecureEnclaveSecret(allocator, key_version orelse return error.InvalidArgs, options.require_user_presence);
 }
 
 fn tpm2WrapSecret(allocator: std.mem.Allocator, record: ?WrappedDekRecord) !WrapSecret {
@@ -3819,7 +3847,7 @@ test "platform secure store provider label matches the local OS" {
 }
 
 test "secure enclave records report secure enclave backend provider" {
-    try std.testing.expectEqualStrings("macOS Secure Enclave", backendProviderLabel("platform-secure-store", "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:3").?);
+    try std.testing.expectEqualStrings("macOS Secure Enclave", backendProviderLabel("macos-secure-enclave", "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:3").?);
 }
 
 test "backend metadata lines include secure enclave state and user presence" {
@@ -3828,7 +3856,7 @@ test "backend metadata lines include secure enclave state and user presence" {
     defer out.deinit(allocator);
 
     var writer = out.writer(allocator);
-    try writeBackendMetadataLines(&writer, backendMetadata("platform-secure-store", "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:3", true), "previous_");
+    try writeBackendMetadataLines(&writer, backendMetadata("macos-secure-enclave", "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:3", true), "previous_");
 
     const rendered = try out.toOwnedSlice(allocator);
     defer allocator.free(rendered);
@@ -3846,7 +3874,7 @@ test "status summary reports secure enclave metadata" {
     defer vault.deinit(allocator);
 
     var dek: [dek_len]u8 = [_]u8{0x42} ** dek_len;
-    const wrapped = try wrapDekForBackend(allocator, "platform-secure-store", 2, "secure-enclave-wrap-secret", &dek, .{
+    const wrapped = try wrapDekForBackend(allocator, "macos-secure-enclave", 2, "secure-enclave-wrap-secret", &dek, .{
         .secret = @constCast("secure-enclave-wrap-secret"),
         .secret_ref = "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:2",
         .secure_enclave_ephemeral_pub_b64 = "ZXBoZW1lcmFsLXB1Yg==",
@@ -3871,7 +3899,7 @@ test "status summary reports secure enclave metadata" {
     defer freeStatusSummary(allocator, summary);
 
     try std.testing.expect(summary.initialized);
-    try std.testing.expectEqualStrings("platform-secure-store", summary.backend.?);
+    try std.testing.expectEqualStrings("macos-secure-enclave", summary.backend.?);
     try std.testing.expectEqualStrings("macOS Secure Enclave", summary.backend_provider.?);
     try std.testing.expect(summary.secure_enclave);
     try std.testing.expectEqual(true, summary.user_presence_required.?);
@@ -4304,7 +4332,7 @@ test "rekey can switch from insecure-keyfile to resolved platform-secure-store b
     var vault = try setupTestVault();
     defer vault.deinit(allocator);
 
-    const target_backend = try resolveBackendChoice("platform-secure-store", false, true, true);
+    const target_backend = try resolveBackendChoice("platform-secure-store", false, true, true, false);
     const target_secret_ref: ?[]const u8 = if (std.mem.eql(u8, target_backend, "platform-secure-store")) "platform-ref-1" else null;
     const target_tpm2_pub: ?[]const u8 = if (std.mem.eql(u8, target_backend, "tpm2")) "dHBtMi1wdWI=" else null;
     const target_tpm2_priv: ?[]const u8 = if (std.mem.eql(u8, target_backend, "tpm2")) "dHBtMi1wcml2" else null;
@@ -4369,7 +4397,7 @@ test "rekey can switch between secure enclave and plain platform store metadata"
         vault.keys_path,
         vault.wrapped,
         "insecure-local-keyfile",
-        "platform-secure-store",
+        "macos-secure-enclave",
         "secure-enclave-wrap-secret",
         "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:2",
         null,
@@ -4382,7 +4410,7 @@ test "rekey can switch between secure enclave and plain platform store metadata"
     const secure_record = try loadWrappedDek(allocator, vault.keys_path);
     defer freeWrappedDekRecord(allocator, secure_record);
     try std.testing.expect(isMacOsSecureEnclaveRecord(secure_record));
-    try std.testing.expectEqualStrings("platform-secure-store", secure_record.backend);
+    try std.testing.expectEqualStrings("macos-secure-enclave", secure_record.backend);
     try std.testing.expectEqualStrings(hkdf_sha256_kdf_name, secure_record.kdf.?);
     try std.testing.expectEqual(true, secure_record.require_user_presence.?);
     try std.testing.expectEqualStrings("ZXBoZW1lcmFsLXB1Yg==", secure_record.secure_enclave_ephemeral_pub_b64.?);

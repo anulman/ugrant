@@ -15,6 +15,7 @@ pub const BackendMetadata = struct {
 };
 
 pub fn backendProviderLabel(backend: []const u8, secret_ref: ?[]const u8) ?[]const u8 {
+    if (std.mem.eql(u8, backend, "macos-secure-enclave")) return "macOS Secure Enclave";
     if (!std.mem.eql(u8, backend, "platform-secure-store")) return null;
 
     if (secret_ref) |ref| {
@@ -29,7 +30,7 @@ pub fn backendProviderLabel(backend: []const u8, secret_ref: ?[]const u8) ?[]con
 }
 
 pub fn backendMetadata(backend: []const u8, secret_ref: ?[]const u8, require_user_presence: ?bool) BackendMetadata {
-    const secure_enclave = if (secret_ref) |ref| std.mem.startsWith(u8, ref, secure_enclave_secret_ref_prefix) else false;
+    const secure_enclave = std.mem.eql(u8, backend, "macos-secure-enclave") or if (secret_ref) |ref| std.mem.startsWith(u8, ref, secure_enclave_secret_ref_prefix) else false;
     return .{
         .provider = backendProviderLabel(backend, secret_ref),
         .secure_enclave = secure_enclave,
