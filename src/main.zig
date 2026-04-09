@@ -725,6 +725,7 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
 
     const wrapped = try loadWrappedDek(allocator, paths.keys_path);
     defer freeWrappedDekRecord(allocator, wrapped);
+    try out.print("ugrant rekey debug: loaded backend={s} key_version={} secret_ref={?s} require_user_presence={?}\n", .{ wrapped.backend, wrapped.key_version, wrapped.secret_ref, wrapped.require_user_presence });
 
     const current_wrap_secret = wrapSecretForBackend(allocator, wrapped.backend, "Current ugrant passphrase: ", paths.keys_path, wrapped.key_version, wrapped) catch |wrap_err| switch (wrap_err) {
         error.MacOsSecureEnclaveUserCancelled => {
