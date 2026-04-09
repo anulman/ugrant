@@ -115,6 +115,7 @@ func createSecureEnclavePrivateKey(tag: String, requireUserPresence: Bool) -> Se
 
     let privateKeyAttrs: [String: Any] = [
         kSecAttrIsPermanent as String: true,
+        kSecAttrLabel as String: tag,
         kSecAttrApplicationTag as String: Data(tag.utf8),
         kSecAttrAccessControl as String: access,
     ]
