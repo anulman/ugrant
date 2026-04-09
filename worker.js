@@ -167,7 +167,7 @@ esac
 case "$ARCH" in
   x86_64|amd64) arch="x86_64" ;;
   arm64|aarch64)
-    if [ "$os" = "linux" ]; then
+    if [ "$os" = "linux" ] || [ "$os" = "macos" ]; then
       arch="aarch64"
     else
       arch="arm64"
