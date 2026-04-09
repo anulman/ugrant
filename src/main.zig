@@ -822,9 +822,11 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     }
     defer freeWrapSecret(allocator, target_wrap);
 
+    try err.print("ugrant rekey debug: target_backend={s} target_secret_ref={?s} target_require_user_presence={}\n", .{ target_backend, target_wrap.secret_ref, target_wrap.require_user_presence });
     const db = try openDb(paths.db_path);
     defer _ = c.sqlite3_close(db);
     const stats = try performRekey(allocator, db, paths.keys_path, wrapped, current_wrap_secret.secret, target_backend, target_wrap.secret, target_wrap.secret_ref, target_wrap.tpm2_pub_b64, target_wrap.tpm2_priv_b64, target_wrap.secure_enclave_ephemeral_pub_b64, target_wrap.require_user_presence);
+    try err.print("ugrant rekey debug: performRekey returned key_version={} target_backend={s} target_secret_ref={?s}\n", .{ stats.key_version, target_backend, target_wrap.secret_ref });
     try tightenSecretStatePermissions(paths);
     const target_metadata = backendMetadata(target_backend, target_wrap.secret_ref, target_wrap.require_user_presence);
     const previous_metadata = backendMetadata(wrapped.backend, wrapped.secret_ref, wrapped.require_user_presence);
@@ -2545,10 +2547,10 @@ fn performRekey(allocator: std.mem.Allocator, db: *c.sqlite3, keys_path: []const
     const new_record = try wrapDekForBackend(allocator, target_backend, current_record.key_version + 1, target_wrap_secret, &new_dek, target_wrap);
     defer freeWrappedDekRecord(allocator, new_record);
 
-    saveWrappedDek(keys_path, new_record) catch |err| {
+    saveWrappedDek(keys_path, new_record) catch |save_err| {
         _ = try rekeyEncryptedState(allocator, db, &new_dek, old_dek);
         cleanupPersistedWrapSecret(allocator, target_backend, target_wrap) catch {};
-        return err;
+        return save_err;
     };
 
     if (current_record.secret_ref) |current_secret_ref| {
