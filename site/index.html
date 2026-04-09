@@ -65,10 +65,22 @@
             <div class="install-callout" id="install">
               <p class="install-label">Install</p>
               <pre><code>curl -fsSLo /tmp/ugrant-install.sh https://www.ugrant.sh/install.sh && sh /tmp/ugrant-install.sh</code></pre>
-              <p><code>irm https://www.ugrant.sh/install.ps1 | iex</code> for Windows PowerShell.</p>
-              <p>On Windows, that installs to <code>%LOCALAPPDATA%\Programs\ugrant\bin</code> and adds it to your user PATH.</p>
-              <p>For PowerShell scripting, <code>ugrant env --format json | ConvertFrom-Json</code> is the path of least resistance.</p>
-              <p>The installers prefer minisign verification automatically when <code>minisign</code> is present.</p>
+              <p class="install-alt"><span>Windows PowerShell</span><code>irm https://www.ugrant.sh/install.ps1 | iex</code></p>
+
+              <div class="install-notes" aria-label="Install notes">
+                <details>
+                  <summary>Where Windows installs it</summary>
+                  <p>Into <code>%LOCALAPPDATA%\Programs\ugrant\bin</code>, and it adds that folder to your user PATH.</p>
+                </details>
+                <details>
+                  <summary>PowerShell scripting tip</summary>
+                  <p>Use <code>ugrant env --format json | ConvertFrom-Json</code>. It is the least annoying path.</p>
+                </details>
+                <details>
+                  <summary>How verification works</summary>
+                  <p>The installers prefer minisign automatically when <code>minisign</code> is present, then fall back to checksums only for compatibility.</p>
+                </details>
+              </div>
             </div>
 
             <div class="hero-actions">

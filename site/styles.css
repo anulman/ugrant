@@ -174,6 +174,75 @@ h3 {
   color: var(--accent);
 }
 
+.install-alt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0.9rem 0 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.install-alt span {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.install-alt code {
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+.install-notes {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 1rem;
+}
+
+.install-notes details {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.62);
+  overflow: hidden;
+}
+
+.install-notes summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 0.8rem 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.install-notes summary::-webkit-details-marker {
+  display: none;
+}
+
+.install-notes summary::after {
+  content: "+";
+  color: var(--accent);
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.install-notes details[open] summary::after {
+  content: "−";
+}
+
+.install-notes details p {
+  margin: 0;
+  padding: 0 0.95rem 0.9rem;
+  color: var(--muted);
+}
+
 pre {
   overflow-x: auto;
   max-width: 100%;
@@ -365,6 +434,19 @@ pre {
 
   .install-callout {
     padding: 0.9rem;
+  }
+
+  .install-alt {
+    align-items: flex-start;
+    font-size: 0.92rem;
+  }
+
+  .install-alt code {
+    width: 100%;
+    border-radius: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
   }
 
   pre {
