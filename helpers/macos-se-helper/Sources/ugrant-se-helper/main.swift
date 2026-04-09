@@ -302,6 +302,43 @@ func emit(_ payload: [String: Any]) {
         fail("JSON serialization failed: \(error)")
     }
 }
+func runScAuth(_ args: [String]) -> String {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/sbin/sc_auth")
+    proc.arguments = args
+    let out = Pipe()
+    let err = Pipe()
+    proc.standardOutput = out
+    proc.standardError = err
+    do {
+        try proc.run()
+    } catch {
+        fail("failed to launch sc_auth: \(error)")
+    }
+    proc.waitUntilExit()
+    let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    guard proc.terminationStatus == 0 else {
+        fail("sc_auth failed: \(stderr.isEmpty ? stdout : stderr)")
+    }
+    return stdout
+}
+func parseCtkIdentities(_ text: String) -> [[String: String]] {
+    let lines = text.split(whereSeparator: \ .isNewline).map(String.init).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+    guard lines.count >= 2 else { return [] }
+    return lines.dropFirst().compactMap { line in
+        let parts = line.split(whereSeparator: \ .isWhitespace).map(String.init)
+        guard parts.count >= 6 else { return nil }
+        return [
+            "key_type": parts[0],
+            "public_key_hash": parts[1],
+            "protection": parts[2],
+            "label": parts[3],
+            "common_name": parts[4],
+            "valid": parts.last ?? "",
+        ]
+    }
+}
 let args = CommandLine.arguments
 if args.count < 2 { fail("missing mode") }
 switch args[1] {
@@ -346,6 +383,24 @@ case "create-persist-test":
         "secret_ref": "macos-secure-enclave:tag=\(tag)",
         "require_user_presence": requireUserPresence,
     ])
+case "create-ctk":
+    if args.count != 4 { fail("usage: create-ctk <label> <require-user-presence>") }
+    let label = args[2]
+    let requireUserPresence = args[3] == "1" || args[3].lowercased() == "true"
+    let protection = requireUserPresence ? "bio" : "none"
+    _ = runScAuth(["create-ctk-identity", "-l", label, "-k", "p-256", "-t", protection])
+    let identities = parseCtkIdentities(runScAuth(["list-ctk-identities"]))
+    guard let match = identities.first(where: { $0["label"] == label }) else {
+        fail("created CTK identity not found after sc_auth create")
+    }
+    emit([
+        "secret_ref": "macos-ctk-secure-enclave:label=\(label);hash=\(match["public_key_hash"] ?? "")",
+        "label": label,
+        "public_key_hash": match["public_key_hash"] ?? "",
+        "require_user_presence": requireUserPresence,
+    ])
+case "list-ctk":
+    emit(["identities": parseCtkIdentities(runScAuth(["list-ctk-identities"]))])
 case "load":
     if args.count != 4 { fail("usage: load <tag> <ephemeral-pub-b64>") }
     guard let ephemeralPub = Data(base64Encoded: args[3]) else { fail("invalid ephemeral public key base64") }
