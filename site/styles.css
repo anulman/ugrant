@@ -174,29 +174,6 @@ h3 {
   color: var(--accent);
 }
 
-.install-alt {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.55rem;
-  margin: 0.9rem 0 0;
-  color: var(--muted);
-  font-size: 0.95rem;
-}
-
-.install-alt span {
-  font-weight: 600;
-  color: var(--text);
-}
-
-.install-alt code {
-  padding: 0.2rem 0.45rem;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid var(--border);
-  font-size: 0.9rem;
-}
-
 .install-notes {
   display: grid;
   gap: 0.7rem;
@@ -434,19 +411,6 @@ pre {
 
   .install-callout {
     padding: 0.9rem;
-  }
-
-  .install-alt {
-    align-items: flex-start;
-    font-size: 0.92rem;
-  }
-
-  .install-alt code {
-    width: 100%;
-    border-radius: 12px;
-    white-space: pre-wrap;
-    word-break: break-word;
-    overflow-wrap: anywhere;
   }
 
   pre {
