@@ -287,10 +287,18 @@ if [ -z "$binary" ]; then
   exit 1
 fi
 
+helper="$(find "$tmpdir" -type f -name ugrant-se-helper | head -n 1)"
+
 install_dir="$HOME/.local/bin"
 mkdir -p "$install_dir"
 cp "$binary" "$install_dir/ugrant"
 chmod +x "$install_dir/ugrant"
+
+if [ -n "$helper" ]; then
+  cp "$helper" "$install_dir/ugrant-se-helper"
+  chmod +x "$install_dir/ugrant-se-helper"
+  echo "Installed ugrant-se-helper to $install_dir/ugrant-se-helper"
+fi
 
 echo "Installed ugrant to $install_dir/ugrant"
 echo "$verification_summary"
