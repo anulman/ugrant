@@ -948,7 +948,7 @@ fn cmdDoctor(allocator: std.mem.Allocator, args: []const []const u8, out: *std.I
     try out.print("backend: {s}\n", .{wrapped.backend});
     try writeBackendMetadataLines(out, metadata, "");
     if (std.mem.eql(u8, wrapped.backend, "macos-secure-enclave")) {
-        const dek = try unwrapMacOsSecureEnclaveDekForDoctor(allocator, wrapped, err);
+        const dek = try unwrapMacOsSecureEnclaveDekForDoctor(allocator, wrapped, out, err);
         defer allocator.free(dek);
 
         const db = try openDb(paths.db_path);
@@ -2064,7 +2064,7 @@ fn createMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, key_vers
     const label = try formatMacOsSecureEnclaveApplicationTag(allocator, key_version);
     defer allocator.free(label);
     const protection = if (require_user_presence) "bio" else "none";
-    const create_result = runScAuth(allocator, &.{ "create-ctk-identity", "-l", label, "-k", "p-256", "-t", protection }) catch |sc_err| {
+    const create_result = runScAuth(allocator, &.{ "create-ctk-identity", "-l", label, "-k", "p-256", "-t", protection, "-N", "ugrant" }) catch |sc_err| {
         return .{ .failure = .{ .reason = .unavailable, .message = try std.fmt.allocPrint(allocator, "sc_auth create-ctk-identity failed: {any}", .{sc_err}) } };
     };
     defer allocator.free(create_result.stdout);
@@ -2076,7 +2076,7 @@ fn createMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, key_vers
         else => return .{ .failure = .{ .reason = .unavailable, .message = try allocator.dupe(u8, "sc_auth create-ctk-identity terminated unexpectedly") } },
     }
 
-    const list_result = runScAuth(allocator, &.{ "list-ctk-identities" }) catch |sc_err| {
+    const list_result = runScAuth(allocator, &.{"list-ctk-identities"}) catch |sc_err| {
         return .{ .failure = .{ .reason = .unavailable, .message = try std.fmt.allocPrint(allocator, "sc_auth list-ctk-identities failed: {any}", .{sc_err}) } };
     };
     defer allocator.free(list_result.stdout);
@@ -2143,7 +2143,7 @@ fn loadMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []cons
     }
     if (builtin.os.tag != .macos) return error.WrapBackendUnavailable;
 
-    const list_result = try runScAuth(allocator, &.{ "list-ctk-identities" });
+    const list_result = try runScAuth(allocator, &.{"list-ctk-identities"});
     defer allocator.free(list_result.stdout);
     defer allocator.free(list_result.stderr);
     switch (list_result.term) {
@@ -2199,7 +2199,7 @@ fn loadMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, secret_ref
     };
 }
 
-fn unwrapMacOsSecureEnclaveDekForDoctor(allocator: std.mem.Allocator, record: WrappedDekRecord, err: *std.Io.Writer) ![]u8 {
+fn unwrapMacOsSecureEnclaveDekForDoctor(allocator: std.mem.Allocator, record: WrappedDekRecord, out: *std.Io.Writer, err: *std.Io.Writer) ![]u8 {
     const secret_ref = record.secret_ref orelse {
         try err.writeAll("doctor: macOS Secure Enclave key reference is invalid\n");
         std.process.exit(1);
@@ -2218,6 +2218,8 @@ fn unwrapMacOsSecureEnclaveDekForDoctor(allocator: std.mem.Allocator, record: Wr
         .success => |wrap| wrap,
         .failure => |failure| {
             try err.writeAll(macOsSecureEnclaveDoctorFailureMessage(failure.reason));
+            try out.flush();
+            try err.flush();
             std.process.exit(1);
         },
     };
