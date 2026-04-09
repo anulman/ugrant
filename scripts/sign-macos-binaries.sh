@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HELPER_ENTITLEMENTS="$ROOT/helpers/macos-se-helper/entitlements.plist"
 IDENTITY="${APPLE_CODESIGN_IDENTITY:-}"
 
 if [[ $# -lt 1 ]]; then
@@ -33,11 +31,7 @@ for binary in "$@"; do
     --options runtime
   )
 
-  if [[ "$(basename "$binary")" == "ugrant-se-helper" ]]; then
-    args+=(--entitlements "$HELPER_ENTITLEMENTS" -i dev.ugrant.secure-enclave-helper)
-  else
-    args+=(-i dev.ugrant)
-  fi
+  args+=(-i dev.ugrant)
 
   codesign "${args[@]}" "$binary"
 done

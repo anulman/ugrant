@@ -105,8 +105,8 @@ Both installers prefer minisign verification when `minisign` is available. If no
 - Existing passphrase or insecure installs are not silently migrated into Keychain. Move them explicitly with `ugrant rekey --backend platform-secure-store`.
 - Secure Enclave mode is a separate macOS opt-in. Use `ugrant init --secure-enclave` or `ugrant rekey --secure-enclave`, and add `--require-user-presence` only when you want local approval on unwrap.
 - In Secure Enclave mode, the public backend still stays `platform-secure-store`, while `ugrant status` and `ugrant doctor` should report `backend_provider: macOS Secure Enclave`. Plain login Keychain remains the default path when `--secure-enclave` is not set.
-- Release builds now prefer a compiled `ugrant-se-helper` companion binary for Secure Enclave operations on macOS. `ugrant` looks for a sibling helper first, then `UGRANT_MACOS_SE_HELPER`, then PATH, and only falls back to the inline `xcrun swift -` helper for local development.
-- Secure Enclave mode is not yet treated as broadly release-ready. Real-device validation, especially on Apple Silicon, is still a release gate before wider rollout, and the signed helper path is the intended release configuration.
+- Release builds now ship a single `ugrant` binary. The old `ugrant-se-helper` sidecar is no longer packaged or installed.
+- The current macOS bridge path is inline from `ugrant` itself, with `sc_auth` handling CTK identity lifecycle. Secure Enclave mode is still explicit opt-in and still needs more real-device validation before broader rollout.
 - `ugrant doctor` now distinguishes a cancelled user-presence prompt from other Secure Enclave failures, while still reporting missing keys, unsupported hardware, and access problems as separate cases.
 - Live Keychain validation still needs a real Mac. After rekey, confirm `status` and `doctor` look right, then inspect the login keychain with Keychain Access or `security find-generic-password -s dev.ugrant.platform-secure-store ~/Library/Keychains/login.keychain-db`.
 
@@ -224,9 +224,9 @@ Release-readiness for any broader rollout should mean at least one recorded Appl
 
 For signed release validation on macOS, also confirm:
 
-1. the packaged archive contains both `bin/ugrant` and `bin/ugrant-se-helper`
-2. `codesign --verify --verbose=2` passes for both binaries
-3. `spctl --assess --type execute` passes for both binaries
+1. the packaged archive contains `bin/ugrant`
+2. `codesign --verify --verbose=2` passes for `bin/ugrant`
+3. `spctl --assess --type execute` passes for `bin/ugrant`
 4. notarization succeeds for the published macOS `.zip`
 
 ## Project files

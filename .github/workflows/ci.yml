@@ -41,7 +41,3 @@ jobs:
 
       - name: Build
         run: zig build
-
-      - name: Build macOS Secure Enclave helper
-        if: runner.os == 'macOS'
-        run: bash scripts/build-macos-helper.sh --release

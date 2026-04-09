@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const secure_enclave_secret_ref_prefix = "macos-secure-enclave:tag=";
+const secure_enclave_secret_ref_prefix = "macos-ctk-secure-enclave:label=";
 
 pub const WrapBackendOptions = struct {
     secure_enclave: bool = false,
