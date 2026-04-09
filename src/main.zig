@@ -1440,28 +1440,34 @@ const macos_secure_enclave_helper_script =
     "    }\n" ++
     "    return key\n" ++
     "}\n" ++
-    "func createSecureEnclavePrivateKey(tag: String, requireUserPresence: Bool) -> SecKey {\n" ++
-    "    deleteKey(tag: tag)\n" ++
+    "func createSecureEnclavePrivateKey(tag: String, requireUserPresence: Bool, permanent: Bool = true) -> SecKey {\n" ++
     "    var accessError: Unmanaged<CFError>?\n" ++
-    "    var flags: SecAccessControlCreateFlags = [.privateKeyUsage]\n" ++
-    "    if requireUserPresence { flags.insert(.userPresence) }\n" ++
+    "    let flags: SecAccessControlCreateFlags = requireUserPresence ? [.privateKeyUsage, .userPresence] : [.privateKeyUsage]\n" ++
     "    guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &accessError) else {\n" ++
-    "        fail(\"SecAccessControlCreateWithFlags failed: \\(secError(accessError))\")\n" ++
+    "        let failure = secError(accessError)\n" ++
+    "        fail(\"SecAccessControlCreateWithFlags failed: \\(failure.message)\", reason: failure.reason)\n" ++
+    "    }\n" ++
+    "\n" ++
+    "    var privateKeyAttrs: [String: Any] = [\n" ++
+    "        kSecAttrIsPermanent as String: permanent,\n" ++
+    "        kSecAttrAccessControl as String: access,\n" ++
+    "    ]\n" ++
+    "    if permanent {\n" ++
+    "        privateKeyAttrs[kSecAttrLabel as String] = tag\n" ++
+    "        privateKeyAttrs[kSecAttrApplicationTag as String] = Data(tag.utf8)\n" ++
     "    }\n" ++
     "    let attrs: [String: Any] = [\n" ++
     "        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
     "        kSecAttrKeySizeInBits as String: 256,\n" ++
     "        kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,\n" ++
-    "        kSecPrivateKeyAttrs as String: [\n" ++
-    "            kSecAttrIsPermanent as String: true,\n" ++
-    "            kSecAttrApplicationTag as String: Data(tag.utf8),\n" ++
-    "            kSecAttrAccessControl as String: access,\n" ++
-    "        ],\n" ++
+    "        kSecPrivateKeyAttrs as String: privateKeyAttrs,\n" ++
     "    ]\n" ++
+    "\n" ++
     "    var error: Unmanaged<CFError>?\n" ++
     "    guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) else {\n" ++
     "        let failure = secError(error)\n" ++
-    "        fail(\"secure enclave key generation failed: \\(failure.message)\", reason: failure.reason)\n" ++
+    "        let permanence = permanent ? \"persistent\" : \"temporary\"\n" ++
+    "        fail(\"\\(permanence) secure enclave key generation failed: \\(failure.message)\", reason: failure.reason)\n" ++
     "    }\n" ++
     "    return key\n" ++
     "}\n" ++
@@ -1479,6 +1485,20 @@ const macos_secure_enclave_helper_script =
     "    }\n" ++
     "    return key\n" ++
     "}\n" ++
+    "\n" ++
+    "func persistSecureEnclavePrivateKey(_ key: SecKey, tag: String) {\n" ++
+    "    let query: [String: Any] = [\n" ++
+    "        kSecClass as String: kSecClassKey,\n" ++
+    "        kSecValueRef as String: key,\n" ++
+    "        kSecAttrApplicationTag as String: Data(tag.utf8),\n" ++
+    "        kSecAttrLabel as String: tag,\n" ++
+    "        kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,\n" ++
+    "    ]\n" ++
+    "    let status = SecItemAdd(query as CFDictionary, nil)\n" ++
+    "    guard status == errSecSuccess else {\n" ++
+    "        fail(\"SecItemAdd persisted secure enclave key failed: \\(status)\", reason: reasonForStatus(status))\n" ++
+    "    }\n" ++
+    "}\n" ++
     "func publicKeyData(_ key: SecKey) -> Data {\n" ++
     "    guard let pub = SecKeyCopyPublicKey(key) else { fail(\"missing public key\") }\n" ++
     "    var error: Unmanaged<CFError>?\n" ++
@@ -1487,6 +1507,42 @@ const macos_secure_enclave_helper_script =
     "        fail(\"public key export failed: \\(failure.message)\", reason: failure.reason)\n" ++
     "    }\n" ++
     "    return data\n" ++
+    "}\n" ++
+    "func publicKeyHashHex(_ key: SecKey) -> String {\n" ++
+    "    let digest = SHA256.hash(data: publicKeyData(key))\n" ++
+    "    return digest.map { String(format: \"%02x\", $0) }.joined()\n" ++
+    "}\n" ++
+    "func loadCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> SecKey {\n" ++
+    "    let query: [String: Any] = [\n" ++
+    "        kSecClass as String: kSecClassKey,\n" ++
+    "        kSecAttrLabel as String: label,\n" ++
+    "        kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,\n" ++
+    "        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
+    "        kSecReturnRef as String: true,\n" ++
+    "        kSecMatchLimit as String: kSecMatchLimitAll,\n" ++
+    "    ]\n" ++
+    "    var item: CFTypeRef?\n" ++
+    "    let status = SecItemCopyMatching(query as CFDictionary, &item)\n" ++
+    "    guard status == errSecSuccess else {\n" ++
+    "        fail(\"SecItemCopyMatching CTK key failed: \\(status)\", reason: reasonForStatus(status))\n" ++
+    "    }\n" ++
+    "\n" ++
+    "    let keys: [SecKey]\n" ++
+    "    if let many = item as? [SecKey] {\n" ++
+    "        keys = many\n" ++
+    "    } else if let one = item as! SecKey? {\n" ++
+    "        keys = [one]\n" ++
+    "    } else {\n" ++
+    "        fail(\"CTK key lookup returned unexpected result\", reason: \"unavailable\")\n" ++
+    "    }\n" ++
+    "\n" ++
+    "    for key in keys {\n" ++
+    "        if let expectedPublicKeyHash, publicKeyHashHex(SecKeyCopyPublicKey(key)!) != expectedPublicKeyHash {\n" ++
+    "            continue\n" ++
+    "        }\n" ++
+    "        return key\n" ++
+    "    }\n" ++
+    "    fail(\"CTK key not found for label \\(label)\", reason: \"key_missing\")\n" ++
     "}\n" ++
     "func loadWrapMaterial(tag: String) -> Data? {\n" ++
     "    let query: [String: Any] = [\n" ++
@@ -1536,14 +1592,21 @@ const macos_secure_enclave_helper_script =
     "    }\n" ++
     "    return key\n" ++
     "}\n" ++
+    "func keyExchangeContext() -> LAContext {\n" ++
+    "    let context = LAContext()\n" ++
+    "    context.interactionNotAllowed = false\n" ++
+    "    return context\n" ++
+    "}\n" ++
     "func sharedSecret(privateKey: SecKey, publicKey: SecKey) -> Data {\n" ++
     "    let algorithm = SecKeyAlgorithm.ecdhKeyExchangeStandard\n" ++
     "    guard SecKeyIsAlgorithmSupported(privateKey, .keyExchange, algorithm) else {\n" ++
     "        fail(\"ECDH key exchange is not supported for this key\", reason: \"unavailable\")\n" ++
     "    }\n" ++
     "    var error: Unmanaged<CFError>?\n" ++
-    "    let params: [String: Any] = [kSecUseAuthenticationUI as String: kSecUseAuthenticationUIAllow]\n" ++
-    "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params as CFDictionary, &error) as Data? else {\n" ++
+    "    let context = keyExchangeContext()\n" ++
+    "    let params = NSMutableDictionary()\n" ++
+    "    params[kSecUseAuthenticationContext] = context\n" ++
+    "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params, &error) as Data? else {\n" ++
     "        let failure = secError(error)\n" ++
     "        fail(\"key exchange failed: \\(failure.message)\", reason: failure.reason)\n" ++
     "    }\n" ++
@@ -1555,12 +1618,12 @@ const macos_secure_enclave_helper_script =
     "        fail(\"ECDH X9.63 SHA-256 key exchange is not supported for this key\", reason: \"unavailable\")\n" ++
     "    }\n" ++
     "    var error: Unmanaged<CFError>?\n" ++
-    "    let params: [String: Any] = [\n" ++
-    "        kSecKeyKeyExchangeParameterRequestedSize as String: 32,\n" ++
-    "        kSecKeyKeyExchangeParameterSharedInfo as String: wrapMaterialInfo,\n" ++
-    "        kSecUseAuthenticationUI as String: kSecUseAuthenticationUIAllow,\n" ++
-    "    ]\n" ++
-    "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params as CFDictionary, &error) as Data? else {\n" ++
+    "    let context = keyExchangeContext()\n" ++
+    "    let params = NSMutableDictionary()\n" ++
+    "    params[SecKeyKeyExchangeParameter.requestedSize] = 32\n" ++
+    "    params[SecKeyKeyExchangeParameter.sharedInfo] = wrapMaterialInfo\n" ++
+    "    params[kSecUseAuthenticationContext] = context\n" ++
+    "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params, &error) as Data? else {\n" ++
     "        let failure = secError(error)\n" ++
     "        fail(\"wrap key derivation failed: \\(failure.message)\", reason: failure.reason)\n" ++
     "    }\n" ++
@@ -1610,6 +1673,43 @@ const macos_secure_enclave_helper_script =
     "        fail(\"JSON serialization failed: \\(error)\")\n" ++
     "    }\n" ++
     "}\n" ++
+    "func runScAuth(_ args: [String]) -> String {\n" ++
+    "    let proc = Process()\n" ++
+    "    proc.executableURL = URL(fileURLWithPath: \"/usr/sbin/sc_auth\")\n" ++
+    "    proc.arguments = args\n" ++
+    "    let out = Pipe()\n" ++
+    "    let err = Pipe()\n" ++
+    "    proc.standardOutput = out\n" ++
+    "    proc.standardError = err\n" ++
+    "    do {\n" ++
+    "        try proc.run()\n" ++
+    "    } catch {\n" ++
+    "        fail(\"failed to launch sc_auth: \\(error)\")\n" ++
+    "    }\n" ++
+    "    proc.waitUntilExit()\n" ++
+    "    let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? \"\"\n" ++
+    "    let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? \"\"\n" ++
+    "    guard proc.terminationStatus == 0 else {\n" ++
+    "        fail(\"sc_auth failed: \\(stderr.isEmpty ? stdout : stderr)\")\n" ++
+    "    }\n" ++
+    "    return stdout\n" ++
+    "}\n" ++
+    "func parseCtkIdentities(_ text: String) -> [[String: String]] {\n" ++
+    "    let lines = text.split(whereSeparator: \\ .isNewline).map(String.init).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }\n" ++
+    "    guard lines.count >= 2 else { return [] }\n" ++
+    "    return lines.dropFirst().compactMap { line in\n" ++
+    "        let parts = line.split(whereSeparator: \\ .isWhitespace).map(String.init)\n" ++
+    "        guard parts.count >= 6 else { return nil }\n" ++
+    "        return [\n" ++
+    "            \"key_type\": parts[0],\n" ++
+    "            \"public_key_hash\": parts[1],\n" ++
+    "            \"protection\": parts[2],\n" ++
+    "            \"label\": parts[3],\n" ++
+    "            \"common_name\": parts[4],\n" ++
+    "            \"valid\": parts.last ?? \"\",\n" ++
+    "        ]\n" ++
+    "    }\n" ++
+    "}\n" ++
     "let args = CommandLine.arguments\n" ++
     "if args.count < 2 { fail(\"missing mode\") }\n" ++
     "switch args[1] {\n" ++
@@ -1618,7 +1718,7 @@ const macos_secure_enclave_helper_script =
     "    guard let keyVersion = Int(args[2]) else { fail(\"invalid key version\") }\n" ++
     "    let requireUserPresence = args[3] == \"1\" || args[3].lowercased() == \"true\"\n" ++
     "    let tag = appTag(keyVersion)\n" ++
-    "    let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence)\n" ++
+    "    let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence, permanent: true)\n" ++
     "    let ephemeralPrivate = createEphemeralPrivateKey()\n" ++
     "    let ephemeralPubB64 = publicKeyData(ephemeralPrivate).base64EncodedString()\n" ++
     "    let wrapSecret = randomData(32)\n" ++
@@ -1628,9 +1728,99 @@ const macos_secure_enclave_helper_script =
     "    storeWrapMaterial(tag: tag, payload: payload)\n" ++
     "    emit([\n" ++
     "        \"secret_b64\": wrapSecret.base64EncodedString(),\n" ++
-    "        \"secret_ref\": \"macos-ctk-secure-enclave:label=\\(tag);hash=inline-helper\",\n" ++
+    "        \"secret_ref\": \"macos-secure-enclave:tag=\\(tag)\",\n" ++
     "        \"ephemeral_pub_b64\": ephemeralPubB64,\n" ++
     "        \"require_user_presence\": requireUserPresence,\n" ++
+    "    ])\n" ++
+    "case \"create-temp\":\n" ++
+    "    if args.count != 3 { fail(\"usage: create-temp <require-user-presence>\") }\n" ++
+    "    let requireUserPresence = args[2] == \"1\" || args[2].lowercased() == \"true\"\n" ++
+    "    let tag = \"temp.\\(UUID().uuidString)\"\n" ++
+    "    let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence, permanent: false)\n" ++
+    "    emit([\n" ++
+    "        \"public_key_b64\": publicKeyData(SecKeyCopyPublicKey(enclaveKey)!).base64EncodedString(),\n" ++
+    "        \"require_user_presence\": requireUserPresence,\n" ++
+    "    ])\n" ++
+    "case \"create-persist-test\":\n" ++
+    "    if args.count != 4 { fail(\"usage: create-persist-test <key-version> <require-user-presence>\") }\n" ++
+    "    guard let keyVersion = Int(args[2]) else { fail(\"invalid key version\") }\n" ++
+    "    let requireUserPresence = args[3] == \"1\" || args[3].lowercased() == \"true\"\n" ++
+    "    let tag = appTag(keyVersion)\n" ++
+    "    let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence, permanent: false)\n" ++
+    "    persistSecureEnclavePrivateKey(enclaveKey, tag: tag)\n" ++
+    "    let loaded = loadSecureEnclavePrivateKey(tag: tag)\n" ++
+    "    emit([\n" ++
+    "        \"public_key_b64\": publicKeyData(SecKeyCopyPublicKey(loaded)!).base64EncodedString(),\n" ++
+    "        \"secret_ref\": \"macos-secure-enclave:tag=\\(tag)\",\n" ++
+    "        \"require_user_presence\": requireUserPresence,\n" ++
+    "    ])\n" ++
+    "case \"create-ctk\":\n" ++
+    "    if args.count != 4 { fail(\"usage: create-ctk <label> <require-user-presence>\") }\n" ++
+    "    let label = args[2]\n" ++
+    "    let requireUserPresence = args[3] == \"1\" || args[3].lowercased() == \"true\"\n" ++
+    "    let protection = requireUserPresence ? \"bio\" : \"none\"\n" ++
+    "    _ = runScAuth([\"create-ctk-identity\", \"-l\", label, \"-k\", \"p-256\", \"-t\", protection])\n" ++
+    "    let identities = parseCtkIdentities(runScAuth([\"list-ctk-identities\"]))\n" ++
+    "    guard let match = identities.first(where: { $0[\"label\"] == label }) else {\n" ++
+    "        fail(\"created CTK identity not found after sc_auth create\")\n" ++
+    "    }\n" ++
+    "    emit([\n" ++
+    "        \"secret_ref\": \"macos-ctk-secure-enclave:label=\\(label);hash=\\(match[\"public_key_hash\"] ?? \"\")\",\n" ++
+    "        \"label\": label,\n" ++
+    "        \"public_key_hash\": match[\"public_key_hash\"] ?? \"\",\n" ++
+    "        \"require_user_presence\": requireUserPresence,\n" ++
+    "    ])\n" ++
+    "case \"create-ctk-wrap\":\n" ++
+    "    if args.count != 4 { fail(\"usage: create-ctk-wrap <label> <require-user-presence>\") }\n" ++
+    "    let label = args[2]\n" ++
+    "    let requireUserPresence = args[3] == \"1\" || args[3].lowercased() == \"true\"\n" ++
+    "    let protection = requireUserPresence ? \"bio\" : \"none\"\n" ++
+    "    _ = runScAuth([\"create-ctk-identity\", \"-l\", label, \"-k\", \"p-256\", \"-t\", protection, \"-N\", \"ugrant\", \"-O\", \"ugrant\", \"-U\", \"Secure Enclave\", \"-L\", \"Local\", \"-S\", \"Local\", \"-C\", \"US\"])\n" ++
+    "    let identities = parseCtkIdentities(runScAuth([\"list-ctk-identities\"]))\n" ++
+    "    guard let match = identities.first(where: { $0[\"label\"] == label }), let publicKeyHash = match[\"public_key_hash\"], !publicKeyHash.isEmpty else {\n" ++
+    "        fail(\"created CTK identity not found after sc_auth create\")\n" ++
+    "    }\n" ++
+    "    let enclaveKey = loadCtkPrivateKey(label: label, expectedPublicKeyHash: publicKeyHash)\n" ++
+    "    let ephemeralPrivate = createEphemeralPrivateKey()\n" ++
+    "    let ephemeralPubB64 = publicKeyData(ephemeralPrivate).base64EncodedString()\n" ++
+    "    let wrapSecret = randomData(32)\n" ++
+    "    let key = wrapKey(privateKey: ephemeralPrivate, publicKey: SecKeyCopyPublicKey(enclaveKey)!)\n" ++
+    "    var payload = sealWrapMaterial(secret: wrapSecret, key: key)\n" ++
+    "    payload[\"ephemeral_pub_b64\"] = ephemeralPubB64\n" ++
+    "    storeWrapMaterial(tag: label, payload: payload)\n" ++
+    "    emit([\n" ++
+    "        \"secret_b64\": wrapSecret.base64EncodedString(),\n" ++
+    "        \"secret_ref\": \"macos-ctk-secure-enclave:label=\\(label);hash=\\(publicKeyHash)\",\n" ++
+    "        \"ephemeral_pub_b64\": ephemeralPubB64,\n" ++
+    "        \"require_user_presence\": requireUserPresence,\n" ++
+    "    ])\n" ++
+    "case \"list-ctk\":\n" ++
+    "    emit([\"identities\": parseCtkIdentities(runScAuth([\"list-ctk-identities\"]))])\n" ++
+    "case \"load-ctk\":\n" ++
+    "    if args.count != 5 { fail(\"usage: load-ctk <label> <public-key-hash> <ephemeral-pub-b64>\") }\n" ++
+    "    guard let ephemeralPub = Data(base64Encoded: args[4]) else { fail(\"invalid ephemeral public key base64\") }\n" ++
+    "    let enclaveKey = loadCtkPrivateKey(label: args[2], expectedPublicKeyHash: args[3])\n" ++
+    "    let secret: Data\n" ++
+    "    if let stored = loadWrapMaterial(tag: args[2]) {\n" ++
+    "        let raw: Any\n" ++
+    "        do {\n" ++
+    "            raw = try JSONSerialization.jsonObject(with: stored, options: [])\n" ++
+    "        } catch {\n" ++
+    "            fail(\"wrap material JSON is invalid: \\(error)\")\n" ++
+    "        }\n" ++
+    "        guard let payload = raw as? [String: Any] else {\n" ++
+    "            fail(\"wrap material JSON is invalid\")\n" ++
+    "        }\n" ++
+    "        if let storedEphemeral = payload[\"ephemeral_pub_b64\"] as? String, storedEphemeral != args[4] {\n" ++
+    "            fail(\"stored wrap material does not match wrapped-key metadata\")\n" ++
+    "        }\n" ++
+    "        secret = openWrapMaterial(payload: payload, key: wrapKey(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub)))\n" ++
+    "    } else {\n" ++
+    "        secret = sharedSecret(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))\n" ++
+    "    }\n" ++
+    "    emit([\n" ++
+    "        \"secret_b64\": secret.base64EncodedString(),\n" ++
+    "        \"secret_ref\": \"macos-ctk-secure-enclave:label=\\(args[2]);hash=\\(args[3])\",\n" ++
     "    ])\n" ++
     "case \"load\":\n" ++
     "    if args.count != 4 { fail(\"usage: load <tag> <ephemeral-pub-b64>\") }\n" ++
@@ -1656,15 +1846,19 @@ const macos_secure_enclave_helper_script =
     "    }\n" ++
     "    emit([\n" ++
     "        \"secret_b64\": secret.base64EncodedString(),\n" ++
-    "        \"secret_ref\": \"macos-ctk-secure-enclave:label=\\(args[2]);hash=inline-helper\",\n" ++
+    "        \"secret_ref\": \"macos-secure-enclave:tag=\\(args[2])\",\n" ++
     "    ])\n" ++
     "case \"delete\":\n" ++
     "    if args.count != 3 { fail(\"usage: delete <tag>\") }\n" ++
     "    deleteWrapMaterial(tag: args[2])\n" ++
     "    deleteKey(tag: args[2])\n" ++
+    "case \"delete-ctk-wrap\":\n" ++
+    "    if args.count != 3 { fail(\"usage: delete-ctk-wrap <label>\") }\n" ++
+    "    deleteWrapMaterial(tag: args[2])\n" ++
     "default:\n" ++
     "    fail(\"unknown mode: \\(args[1])\")\n" ++
-    "}\n";
+    "}";
+
 
 fn secureEnclaveAvailable(allocator: std.mem.Allocator) bool {
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return true;
@@ -1945,6 +2139,29 @@ fn writeMacOsSecureEnclaveFailure(err: *std.Io.Writer, command_name: []const u8,
     }
 }
 
+fn runMacOsSecureEnclaveHelper(allocator: std.mem.Allocator, argv: []const []const u8) !std.process.Child.RunResult {
+    var full_argv = std.ArrayList([]const u8){};
+    defer full_argv.deinit(allocator);
+    try full_argv.appendSlice(allocator, &.{ "xcrun", "swift", "-" });
+    try full_argv.appendSlice(allocator, argv);
+    return runChildWithInput(allocator, full_argv.items, macos_secure_enclave_helper_script, 64 * 1024);
+}
+
+fn finishMacOsSecureEnclaveHelperResult(allocator: std.mem.Allocator, result: std.process.Child.RunResult) !MacOsSecureEnclaveHelperResult {
+    switch (result.term) {
+        .Exited => |code| {
+            if (code == 0) return .{ .success = try parseSecureEnclaveWrapSecretFromJson(allocator, result.stdout) };
+
+            if (parseMacOsSecureEnclaveFailureFromJson(allocator, result.stderr)) |failure| {
+                return .{ .failure = failure };
+            }
+            const message = std.mem.trim(u8, if (result.stderr.len > 0) result.stderr else result.stdout, "\r\n\t ");
+            return .{ .failure = .{ .reason = .unavailable, .message = if (message.len > 0) try allocator.dupe(u8, message) else null } };
+        },
+        else => return .{ .failure = .{ .reason = .unavailable, .message = try allocator.dupe(u8, "macOS Secure Enclave helper terminated unexpectedly") } },
+    }
+}
+
 fn runScAuth(allocator: std.mem.Allocator, argv: []const []const u8) !std.process.Child.RunResult {
     var full_argv = std.ArrayList([]const u8){};
     defer full_argv.deinit(allocator);
@@ -2028,55 +2245,12 @@ fn createMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, key_vers
 
     const label = try formatMacOsSecureEnclaveApplicationTag(allocator, key_version);
     defer allocator.free(label);
-    const protection = if (require_user_presence) "bio" else "none";
-    const create_result = runScAuth(allocator, &.{ "create-ctk-identity", "-l", label, "-k", "p-256", "-t", protection, "-N", "ugrant" }) catch |sc_err| {
-        return .{ .failure = .{ .reason = .unavailable, .message = try std.fmt.allocPrint(allocator, "sc_auth create-ctk-identity failed: {any}", .{sc_err}) } };
+    const helper_result = runMacOsSecureEnclaveHelper(allocator, &.{ "create-ctk-wrap", label, if (require_user_presence) "1" else "0" }) catch |helper_err| {
+        return .{ .failure = .{ .reason = .unavailable, .message = try std.fmt.allocPrint(allocator, "failed to launch macOS Secure Enclave helper: {any}", .{helper_err}) } };
     };
-    defer allocator.free(create_result.stdout);
-    defer allocator.free(create_result.stderr);
-    switch (create_result.term) {
-        .Exited => |code| if (code != 0) {
-            return .{ .failure = .{ .reason = .unavailable, .message = try allocator.dupe(u8, std.mem.trim(u8, if (create_result.stderr.len > 0) create_result.stderr else create_result.stdout, "\r\n\t ")) } };
-        },
-        else => return .{ .failure = .{ .reason = .unavailable, .message = try allocator.dupe(u8, "sc_auth create-ctk-identity terminated unexpectedly") } },
-    }
-
-    const list_result = runScAuth(allocator, &.{"list-ctk-identities"}) catch |sc_err| {
-        return .{ .failure = .{ .reason = .unavailable, .message = try std.fmt.allocPrint(allocator, "sc_auth list-ctk-identities failed: {any}", .{sc_err}) } };
-    };
-    defer allocator.free(list_result.stdout);
-    defer allocator.free(list_result.stderr);
-    switch (list_result.term) {
-        .Exited => |code| if (code != 0) {
-            return .{ .failure = .{ .reason = .unavailable, .message = try allocator.dupe(u8, std.mem.trim(u8, if (list_result.stderr.len > 0) list_result.stderr else list_result.stdout, "\r\n\t ")) } };
-        },
-        else => return .{ .failure = .{ .reason = .unavailable, .message = try allocator.dupe(u8, "sc_auth list-ctk-identities terminated unexpectedly") } },
-    }
-    const refs = try parseScAuthIdentities(allocator, list_result.stdout);
-    defer freeMacOsSecureEnclaveRefs(allocator, refs);
-    for (refs) |ref| {
-        if (std.mem.eql(u8, ref.label, label)) {
-            const secret_ref = try formatMacOsSecureEnclaveSecretRefForParts(allocator, ref.label, ref.public_key_hash);
-            errdefer allocator.free(secret_ref);
-            const secret = try randomUrlSafe(allocator, 32);
-            errdefer freeSecret(allocator, secret);
-            const ephemeral_pub_b64 = if (try getEnvVarOwnedOrNull(allocator, "UGRANT_TEST_SECURE_ENCLAVE_EPHEMERAL_PUB_B64")) |v|
-                v
-            else blk: {
-                var ephemeral_pub: [33]u8 = undefined;
-                crypto.random.bytes(&ephemeral_pub);
-                break :blk try b64EncodeAlloc(allocator, &ephemeral_pub);
-            };
-            errdefer allocator.free(ephemeral_pub_b64);
-            return .{ .success = .{
-                .secret = secret,
-                .secret_ref = secret_ref,
-                .secure_enclave_ephemeral_pub_b64 = ephemeral_pub_b64,
-                .require_user_presence = require_user_presence,
-            } };
-        }
-    }
-    return .{ .failure = .{ .reason = .unavailable, .message = try std.fmt.allocPrint(allocator, "CTK identity with label {s} not found after sc_auth create", .{label}) } };
+    defer allocator.free(helper_result.stdout);
+    defer allocator.free(helper_result.stderr);
+    return finishMacOsSecureEnclaveHelperResult(allocator, helper_result);
 }
 
 fn createMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, key_version: u32, require_user_presence: bool) !WrapSecret {
@@ -2091,8 +2265,8 @@ fn createMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, key_version: u32
 }
 
 fn loadMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []const u8, expected_key_version: u32, ephemeral_pub_b64: []const u8, require_user_presence: bool) !WrapSecret {
-    _ = expected_key_version;
     const parsed = try parseMacOsSecureEnclaveSecretRef(secret_ref);
+    if (parsed.key_version != expected_key_version) return error.InvalidWrappedDek;
 
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) {
         const secret = loadSyntheticSecureEnclaveWrapSecret(allocator, parsed.label, ephemeral_pub_b64) catch |err| switch (err) {
@@ -2108,31 +2282,40 @@ fn loadMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []cons
     }
     if (builtin.os.tag != .macos) return error.WrapBackendUnavailable;
 
-    const list_result = try runScAuth(allocator, &.{"list-ctk-identities"});
-    defer allocator.free(list_result.stdout);
-    defer allocator.free(list_result.stderr);
-    switch (list_result.term) {
-        .Exited => |code| if (code != 0) return error.WrapBackendUnavailable,
-        else => return error.WrapBackendUnavailable,
-    }
-    const refs = try parseScAuthIdentities(allocator, list_result.stdout);
-    defer freeMacOsSecureEnclaveRefs(allocator, refs);
-    for (refs) |ref| {
-        if (std.mem.eql(u8, ref.label, parsed.label) and std.mem.eql(u8, ref.public_key_hash, parsed.public_key_hash)) {
-            return .{
-                .secret = try randomUrlSafe(allocator, 32),
-                .secret_ref = try allocator.dupe(u8, secret_ref),
-                .secure_enclave_ephemeral_pub_b64 = try allocator.dupe(u8, ephemeral_pub_b64),
-                .require_user_presence = require_user_presence,
-            };
-        }
-    }
-    return error.MacOsSecureEnclaveKeyMissing;
+    const result = try loadMacOsSecureEnclaveSecretDetailed(allocator, secret_ref, expected_key_version, ephemeral_pub_b64, require_user_presence);
+    return switch (result) {
+        .success => |wrap| wrap,
+        .failure => |failure| {
+            defer freeMacOsSecureEnclaveFailure(allocator, failure);
+            return macOsSecureEnclaveFailureError(failure.reason);
+        },
+    };
 }
 
 fn loadMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, secret_ref: []const u8, expected_key_version: u32, ephemeral_pub_b64: []const u8, require_user_presence: bool) !MacOsSecureEnclaveHelperResult {
-    _ = expected_key_version;
-    return .{ .success = try loadMacOsSecureEnclaveSecret(allocator, secret_ref, 0, ephemeral_pub_b64, require_user_presence) };
+    const parsed = try parseMacOsSecureEnclaveSecretRef(secret_ref);
+    if (parsed.key_version != expected_key_version) return .{ .failure = .{ .reason = .key_missing, .message = try std.fmt.allocPrint(allocator, "Secure Enclave key version mismatch: expected {}, got {}", .{ expected_key_version, parsed.key_version }) } };
+
+    if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) {
+        const secret = loadSyntheticSecureEnclaveWrapSecret(allocator, parsed.label, ephemeral_pub_b64) catch |err| switch (err) {
+            error.WrapBackendUnavailable => try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_SECRET", "secure-enclave-test-secret"),
+            else => return err,
+        };
+        return .{ .success = .{
+            .secret = secret,
+            .secret_ref = try allocator.dupe(u8, secret_ref),
+            .secure_enclave_ephemeral_pub_b64 = try allocator.dupe(u8, ephemeral_pub_b64),
+            .require_user_presence = require_user_presence,
+        } };
+    }
+    if (builtin.os.tag != .macos) return .{ .failure = .{ .reason = .unavailable } };
+
+    const helper_result = runMacOsSecureEnclaveHelper(allocator, &.{ "load-ctk", parsed.label, parsed.public_key_hash, ephemeral_pub_b64 }) catch |helper_err| {
+        return .{ .failure = .{ .reason = .unavailable, .message = try std.fmt.allocPrint(allocator, "failed to launch macOS Secure Enclave helper: {any}", .{helper_err}) } };
+    };
+    defer allocator.free(helper_result.stdout);
+    defer allocator.free(helper_result.stderr);
+    return finishMacOsSecureEnclaveHelperResult(allocator, helper_result);
 }
 
 fn unwrapMacOsSecureEnclaveDekForDoctor(allocator: std.mem.Allocator, record: WrappedDekRecord, out: *std.Io.Writer, err: *std.Io.Writer) ![]u8 {
@@ -2173,8 +2356,11 @@ fn unwrapMacOsSecureEnclaveDekForDoctor(allocator: std.mem.Allocator, record: Wr
 fn deleteMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []const u8) !void {
     const parsed = try parseMacOsSecureEnclaveSecretRef(secret_ref);
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return deleteSecureEnclaveTestBlob(allocator, parsed.label);
-    // CTK identities are currently left in place; rekey cleanup should not fail on missing delete support.
-    return;
+    if (builtin.os.tag != .macos) return;
+
+    const helper_result = runMacOsSecureEnclaveHelper(allocator, &.{ "delete-ctk-wrap", parsed.label }) catch return;
+    defer allocator.free(helper_result.stdout);
+    defer allocator.free(helper_result.stderr);
 }
 
 fn cleanupPersistedWrapSecret(allocator: std.mem.Allocator, backend: []const u8, wrap: WrapSecret) !void {

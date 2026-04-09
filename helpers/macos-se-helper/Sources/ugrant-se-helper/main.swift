@@ -173,6 +173,42 @@ func publicKeyData(_ key: SecKey) -> Data {
     }
     return data
 }
+func publicKeyHashHex(_ key: SecKey) -> String {
+    let digest = SHA256.hash(data: publicKeyData(key))
+    return digest.map { String(format: "%02x", $0) }.joined()
+}
+func loadCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> SecKey {
+    let query: [String: Any] = [
+        kSecClass as String: kSecClassKey,
+        kSecAttrLabel as String: label,
+        kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+        kSecReturnRef as String: true,
+        kSecMatchLimit as String: kSecMatchLimitAll,
+    ]
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &item)
+    guard status == errSecSuccess else {
+        fail("SecItemCopyMatching CTK key failed: \(status)", reason: reasonForStatus(status))
+    }
+
+    let keys: [SecKey]
+    if let many = item as? [SecKey] {
+        keys = many
+    } else if let one = item as! SecKey? {
+        keys = [one]
+    } else {
+        fail("CTK key lookup returned unexpected result", reason: "unavailable")
+    }
+
+    for key in keys {
+        if let expectedPublicKeyHash, publicKeyHashHex(SecKeyCopyPublicKey(key)!) != expectedPublicKeyHash {
+            continue
+        }
+        return key
+    }
+    fail("CTK key not found for label \(label)", reason: "key_missing")
+}
 func loadWrapMaterial(tag: String) -> Data? {
     let query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
@@ -399,8 +435,58 @@ case "create-ctk":
         "public_key_hash": match["public_key_hash"] ?? "",
         "require_user_presence": requireUserPresence,
     ])
+case "create-ctk-wrap":
+    if args.count != 4 { fail("usage: create-ctk-wrap <label> <require-user-presence>") }
+    let label = args[2]
+    let requireUserPresence = args[3] == "1" || args[3].lowercased() == "true"
+    let protection = requireUserPresence ? "bio" : "none"
+    _ = runScAuth(["create-ctk-identity", "-l", label, "-k", "p-256", "-t", protection, "-N", "ugrant", "-O", "ugrant", "-U", "Secure Enclave", "-L", "Local", "-S", "Local", "-C", "US"])
+    let identities = parseCtkIdentities(runScAuth(["list-ctk-identities"]))
+    guard let match = identities.first(where: { $0["label"] == label }), let publicKeyHash = match["public_key_hash"], !publicKeyHash.isEmpty else {
+        fail("created CTK identity not found after sc_auth create")
+    }
+    let enclaveKey = loadCtkPrivateKey(label: label, expectedPublicKeyHash: publicKeyHash)
+    let ephemeralPrivate = createEphemeralPrivateKey()
+    let ephemeralPubB64 = publicKeyData(ephemeralPrivate).base64EncodedString()
+    let wrapSecret = randomData(32)
+    let key = wrapKey(privateKey: ephemeralPrivate, publicKey: SecKeyCopyPublicKey(enclaveKey)!)
+    var payload = sealWrapMaterial(secret: wrapSecret, key: key)
+    payload["ephemeral_pub_b64"] = ephemeralPubB64
+    storeWrapMaterial(tag: label, payload: payload)
+    emit([
+        "secret_b64": wrapSecret.base64EncodedString(),
+        "secret_ref": "macos-ctk-secure-enclave:label=\(label);hash=\(publicKeyHash)",
+        "ephemeral_pub_b64": ephemeralPubB64,
+        "require_user_presence": requireUserPresence,
+    ])
 case "list-ctk":
     emit(["identities": parseCtkIdentities(runScAuth(["list-ctk-identities"]))])
+case "load-ctk":
+    if args.count != 5 { fail("usage: load-ctk <label> <public-key-hash> <ephemeral-pub-b64>") }
+    guard let ephemeralPub = Data(base64Encoded: args[4]) else { fail("invalid ephemeral public key base64") }
+    let enclaveKey = loadCtkPrivateKey(label: args[2], expectedPublicKeyHash: args[3])
+    let secret: Data
+    if let stored = loadWrapMaterial(tag: args[2]) {
+        let raw: Any
+        do {
+            raw = try JSONSerialization.jsonObject(with: stored, options: [])
+        } catch {
+            fail("wrap material JSON is invalid: \(error)")
+        }
+        guard let payload = raw as? [String: Any] else {
+            fail("wrap material JSON is invalid")
+        }
+        if let storedEphemeral = payload["ephemeral_pub_b64"] as? String, storedEphemeral != args[4] {
+            fail("stored wrap material does not match wrapped-key metadata")
+        }
+        secret = openWrapMaterial(payload: payload, key: wrapKey(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub)))
+    } else {
+        secret = sharedSecret(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))
+    }
+    emit([
+        "secret_b64": secret.base64EncodedString(),
+        "secret_ref": "macos-ctk-secure-enclave:label=\(args[2]);hash=\(args[3])",
+    ])
 case "load":
     if args.count != 4 { fail("usage: load <tag> <ephemeral-pub-b64>") }
     guard let ephemeralPub = Data(base64Encoded: args[3]) else { fail("invalid ephemeral public key base64") }
@@ -431,6 +517,9 @@ case "delete":
     if args.count != 3 { fail("usage: delete <tag>") }
     deleteWrapMaterial(tag: args[2])
     deleteKey(tag: args[2])
+case "delete-ctk-wrap":
+    if args.count != 3 { fail("usage: delete-ctk-wrap <label>") }
+    deleteWrapMaterial(tag: args[2])
 default:
     fail("unknown mode: \(args[1])")
 }
