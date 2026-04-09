@@ -99,7 +99,8 @@ Both installers prefer minisign verification when `minisign` is available. If no
 - Existing passphrase or insecure installs are not silently migrated into Keychain. Move them explicitly with `ugrant rekey --backend platform-secure-store`.
 - Secure Enclave mode is a separate macOS opt-in. Use `ugrant init --secure-enclave` or `ugrant rekey --secure-enclave`, and add `--require-user-presence` only when you want local approval on unwrap.
 - In Secure Enclave mode, the public backend still stays `platform-secure-store`, while `ugrant status` and `ugrant doctor` should report `backend_provider: macOS Secure Enclave`. Plain login Keychain remains the default path when `--secure-enclave` is not set.
-- Secure Enclave mode is not yet treated as broadly release-ready. Real-device validation, especially on Apple Silicon, is still a release gate before wider rollout.
+- Release builds now prefer a compiled `ugrant-se-helper` companion binary for Secure Enclave operations on macOS. `ugrant` looks for a sibling helper first, then `UGRANT_MACOS_SE_HELPER`, then PATH, and only falls back to the inline `xcrun swift -` helper for local development.
+- Secure Enclave mode is not yet treated as broadly release-ready. Real-device validation, especially on Apple Silicon, is still a release gate before wider rollout, and the signed helper path is the intended release configuration.
 - `ugrant doctor` now distinguishes a cancelled user-presence prompt from other Secure Enclave failures, while still reporting missing keys, unsupported hardware, and access problems as separate cases.
 - Live Keychain validation still needs a real Mac. After rekey, confirm `status` and `doctor` look right, then inspect the login keychain with Keychain Access or `security find-generic-password -s dev.ugrant.platform-secure-store ~/Library/Keychains/login.keychain-db`.
 
@@ -172,6 +173,13 @@ The release workflow expects:
 
 - a checked-in `minisign.pub` file containing the public key for release verification
 - a GitHub Actions secret named `MINISIGN_SECRET_KEY` containing the matching secret key
+- for optional macOS signing and notarization, these GitHub Actions secrets:
+  - `APPLE_CODESIGN_P12_BASE64`
+  - `APPLE_CODESIGN_P12_PASSWORD`
+  - `APPLE_CODESIGN_IDENTITY`
+  - `APPLE_TEAM_ID`
+  - `APPLE_ID`
+  - `APPLE_APP_PASSWORD`
 
 A pragmatic way to generate that pair for CI is:
 
@@ -180,6 +188,8 @@ minisign -G -W -p minisign.pub -s ugrant.minisign.key
 ```
 
 That creates an unencrypted secret key, which is simpler for GitHub Actions automation. Store the contents of `ugrant.minisign.key` in the `MINISIGN_SECRET_KEY` repository secret, and commit `minisign.pub`.
+
+For macOS signing/notarization, export a `Developer ID Application` certificate as a `.p12`, base64-encode it into `APPLE_CODESIGN_P12_BASE64`, and keep the other Apple secrets scoped to the release environment only.
 
 ## QA scripts
 
@@ -205,6 +215,13 @@ For Secure Enclave mode, keep the manual gate on a real Mac separate from the Li
 4. Rekey back with `ugrant rekey --backend platform-secure-store` and confirm the install returns to plain `backend_provider: macOS Keychain`.
 
 Release-readiness for any broader rollout should mean at least one recorded Apple Silicon pass for that Keychain -> Secure Enclave -> Keychain round-trip, plus docs that still describe Secure Enclave as explicit opt-in rather than the default macOS path.
+
+For signed release validation on macOS, also confirm:
+
+1. the packaged archive contains both `bin/ugrant` and `bin/ugrant-se-helper`
+2. `codesign --verify --verbose=2` passes for both binaries
+3. `spctl --assess --type execute` passes for both binaries
+4. notarization succeeds for the published macOS `.zip`
 
 ## Project files
 

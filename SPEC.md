@@ -256,7 +256,7 @@ Given a profile resolves to a valid OpenAI-compatible token
 When I run `ugrant exec --profile watcher -- bun daemon.ts`
 Then the child receives `OPENAI_API_KEY`
 And the child receives `OPENAI_BASE_URL` when configured
-And the child receives `LLM_PROVIDER` and `LLM_MODEL` when configured
+And the child receives `UGRANT_PROVIDER` and `LLM_MODEL` when configured
 And the env vars added by `ugrant` do not include the refresh token
 And the env vars added by `ugrant` do not include the DEK
 
