@@ -159,7 +159,7 @@ jobs:
             [ -f "$archive" ] || continue
             sha256sum "$archive" | awk '{print $1"  "FILENAME}' FILENAME="$(basename "$archive")" > "$archive.sha256"
             if [[ -n "${MINISIGN_SECRET_KEY:-}" ]]; then
-              minisign -S -s <(printf '%s' "$MINISIGN_SECRET_KEY") -m "$archive" -x "$archive.minisig"
+              printf '\n' | minisign -S -s <(printf '%s' "$MINISIGN_SECRET_KEY") -m "$archive" -x "$archive.minisig"
             fi
           done
 
@@ -174,10 +174,10 @@ jobs:
             $keyPath = Join-Path $env:RUNNER_TEMP 'minisign.key'
             if ($env:MINISIGN_SECRET_KEY_B64) {
               [System.IO.File]::WriteAllBytes($keyPath, [System.Convert]::FromBase64String($env:MINISIGN_SECRET_KEY_B64))
-              minisign -S -s $keyPath -m $archive -x "$archive.minisig"
+              "" | minisign -S -s $keyPath -m $archive -x "$archive.minisig"
             } elseif ($env:MINISIGN_SECRET_KEY) {
               Set-Content -Path $keyPath -Value $env:MINISIGN_SECRET_KEY -NoNewline
-              minisign -S -s $keyPath -m $archive -x "$archive.minisig"
+              "" | minisign -S -s $keyPath -m $archive -x "$archive.minisig"
             }
           }
 
