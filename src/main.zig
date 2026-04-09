@@ -3751,7 +3751,7 @@ test "windows platform secure store round trips via DPAPI" {
     const keys_path = try std.fs.path.join(allocator, &.{ base, "keys.json" });
     defer allocator.free(keys_path);
 
-    const created = try platformStoreWrapSecret(allocator, keys_path, 1, null, .{});
+    const created = try platformStoreWrapSecret(allocator, keys_path, 1, null);
     defer freeWrapSecret(allocator, created);
     try std.testing.expect(created.secret_ref != null);
 
@@ -3767,7 +3767,7 @@ test "windows platform secure store round trips via DPAPI" {
     };
     defer freeWrappedDekRecord(allocator, record);
 
-    const loaded = try platformStoreWrapSecret(allocator, null, record.key_version, record, .{});
+    const loaded = try platformStoreWrapSecret(allocator, null, record.key_version, record);
     defer freeWrapSecret(allocator, loaded);
     try std.testing.expectEqualStrings(created.secret, loaded.secret);
     try std.testing.expectEqualStrings(created.secret_ref.?, loaded.secret_ref.?);
@@ -4475,7 +4475,7 @@ test "macos platform secure store hook supports rekey migration" {
     var vault = try setupTestVault();
     defer vault.deinit(allocator);
 
-    const created = try platformStoreWrapSecret(allocator, vault.keys_path, 2, null, .{});
+    const created = try platformStoreWrapSecret(allocator, vault.keys_path, 2, null);
     defer freeWrapSecret(allocator, created);
     try std.testing.expectEqualStrings("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:2", created.secret_ref.?);
 
@@ -4488,7 +4488,7 @@ test "macos platform secure store hook supports rekey migration" {
     try std.testing.expectEqual(@as(u32, 2), updated_record.key_version);
     try std.testing.expectEqualStrings(created.secret_ref.?, updated_record.secret_ref.?);
 
-    const loaded = try platformStoreWrapSecret(allocator, null, updated_record.key_version, updated_record, .{});
+    const loaded = try platformStoreWrapSecret(allocator, null, updated_record.key_version, updated_record);
     defer freeWrapSecret(allocator, loaded);
     try std.testing.expectEqualStrings(created.secret, loaded.secret);
     try std.testing.expectEqualStrings(created.secret_ref.?, loaded.secret_ref.?);
