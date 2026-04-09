@@ -125,20 +125,11 @@ func createSecureEnclavePrivateKey(tag: String, requireUserPresence: Bool) -> Se
         kSecPrivateKeyAttrs as String: privateKeyAttrs,
     ]
     var error: Unmanaged<CFError>?
-    if let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) {
-        return key
+    guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) else {
+        let failure = secError(error)
+        fail("secure enclave key generation failed: \(failure.message)", reason: failure.reason)
     }
-
-    let failure = secError(error)
-    if (error?.takeUnretainedValue() as Error?) as NSError? != nil {
-        deleteKey(tag: tag)
-        error = nil
-        if let retryKey = SecKeyCreateRandomKey(attrs as CFDictionary, &error) {
-            return retryKey
-        }
-    }
-    let retryFailure = secError(error)
-    fail("secure enclave key generation failed: initial=\(failure.message); retry=\(retryFailure.message)", reason: retryFailure.reason)
+    return key
 }
 func loadSecureEnclavePrivateKey(tag: String) -> SecKey {
     let query: [String: Any] = [
