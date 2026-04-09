@@ -149,7 +149,7 @@ const INSTALL_SCRIPT = String.raw`#!/bin/sh
 set -eu
 
 BASE_URL="https://www.ugrant.sh"
-MINISIGN_PUBLIC_KEY="RWROMGoscMzrnBn4DAQctEu3E+Y5totRluTj+M/IT0w6ZIuaNjkepTAB"
+MINISIGN_PUBLIC_KEY="RWSImn8N0zHirfQkjOQrSx6b2rD6o7rTjiEnoqye4t4Zy6Y6GjNn5Zq7"
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 verification_summary=""
@@ -269,7 +269,7 @@ echo "Make sure $install_dir is on your PATH"
 const WINDOWS_INSTALL_SCRIPT = String.raw`$ErrorActionPreference = "Stop"
 
 $BaseUrl = "https://www.ugrant.sh"
-$MinisignPublicKey = "RWROMGoscMzrnBn4DAQctEu3E+Y5totRluTj+M/IT0w6ZIuaNjkepTAB"
+$MinisignPublicKey = "RWSImn8N0zHirfQkjOQrSx6b2rD6o7rTjiEnoqye4t4Zy6Y6GjNn5Zq7"
 $verificationSummary = ""
 
 switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
