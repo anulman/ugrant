@@ -150,6 +150,20 @@ func loadSecureEnclavePrivateKey(tag: String) -> SecKey {
     }
     return key
 }
+
+func persistSecureEnclavePrivateKey(_ key: SecKey, tag: String) {
+    let query: [String: Any] = [
+        kSecClass as String: kSecClassKey,
+        kSecValueRef as String: key,
+        kSecAttrApplicationTag as String: Data(tag.utf8),
+        kSecAttrLabel as String: tag,
+        kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+    ]
+    let status = SecItemAdd(query as CFDictionary, nil)
+    guard status == errSecSuccess else {
+        fail("SecItemAdd persisted secure enclave key failed: \(status)", reason: reasonForStatus(status))
+    }
+}
 func publicKeyData(_ key: SecKey) -> Data {
     guard let pub = SecKeyCopyPublicKey(key) else { fail("missing public key") }
     var error: Unmanaged<CFError>?
@@ -317,6 +331,19 @@ case "create-temp":
     let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence, permanent: false)
     emit([
         "public_key_b64": publicKeyData(SecKeyCopyPublicKey(enclaveKey)!).base64EncodedString(),
+        "require_user_presence": requireUserPresence,
+    ])
+case "create-persist-test":
+    if args.count != 4 { fail("usage: create-persist-test <key-version> <require-user-presence>") }
+    guard let keyVersion = Int(args[2]) else { fail("invalid key version") }
+    let requireUserPresence = args[3] == "1" || args[3].lowercased() == "true"
+    let tag = appTag(keyVersion)
+    let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence, permanent: false)
+    persistSecureEnclavePrivateKey(enclaveKey, tag: tag)
+    let loaded = loadSecureEnclavePrivateKey(tag: tag)
+    emit([
+        "public_key_b64": publicKeyData(SecKeyCopyPublicKey(loaded)!).base64EncodedString(),
+        "secret_ref": "macos-secure-enclave:tag=\(tag)",
         "require_user_presence": requireUserPresence,
     ])
 case "load":
