@@ -1147,7 +1147,7 @@ fn wrapSecretForBackend(allocator: std.mem.Allocator, backend: []const u8, promp
 fn wrapSecretForBackendWithOptions(allocator: std.mem.Allocator, backend: []const u8, prompt: []const u8, keys_path: ?[]const u8, key_version: ?u32, record: ?WrappedDekRecord, options: WrapBackendOptions) WrapSecretForBackendError!WrapSecret {
     if (std.mem.eql(u8, backend, "insecure-keyfile")) return .{ .secret = try allocator.dupe(u8, "insecure-local-keyfile") };
     if (std.mem.eql(u8, backend, "passphrase")) return .{ .secret = try promptSecret(allocator, prompt) };
-    if (std.mem.eql(u8, backend, "platform-secure-store")) return platformStoreWrapSecret(allocator, keys_path, key_version, record, options);
+    if (std.mem.eql(u8, backend, "platform-secure-store")) return platformStoreWrapSecret(allocator, keys_path, key_version, record);
     if (std.mem.eql(u8, backend, "macos-secure-enclave")) return macOsSecureEnclaveWrapSecret(allocator, key_version, record, options);
     if (std.mem.eql(u8, backend, "tpm2")) return tpm2WrapSecret(allocator, record);
     return error.UnsupportedWrapBackend;
@@ -2258,7 +2258,7 @@ fn storeMacOsKeychainSecret(allocator: std.mem.Allocator, key_version: u32) !Wra
     return .{ .secret = secret, .secret_ref = secret_ref };
 }
 
-fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8, key_version: ?u32, record: ?WrappedDekRecord, options: WrapBackendOptions) !WrapSecret {
+fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8, key_version: ?u32, record: ?WrappedDekRecord) !WrapSecret {
     if (record) |existing| {
         const secret_ref = existing.secret_ref orelse return error.InvalidWrappedDek;
         if (isMacOsSecureEnclaveSecretRef(secret_ref)) {
@@ -2281,9 +2281,6 @@ fn platformStoreWrapSecret(allocator: std.mem.Allocator, keys_path: ?[]const u8,
         const secret = try allocator.dupe(u8, std.mem.trim(u8, result.stdout, "\r\n\t "));
         allocator.free(result.stdout);
         return .{ .secret = secret, .secret_ref = try allocator.dupe(u8, secret_ref) };
-    }
-    if (options.secure_enclave) {
-        return createMacOsSecureEnclaveSecret(allocator, key_version orelse return error.InvalidArgs, options.require_user_presence);
     }
     if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) {
         const secret_ref = if (builtin.os.tag == .macos)
@@ -3935,17 +3932,14 @@ test "status summary reports secure enclave metadata" {
 test "explicit secure enclave wrap never falls back to plain platform store" {
     if (builtin.os.tag == .macos or envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return;
 
-    try std.testing.expectError(
-        error.WrapBackendUnavailable,
-        platformStoreWrapSecret(std.testing.allocator, null, 7, null, .{ .secure_enclave = true, .require_user_presence = true }),
-    );
+    try std.testing.expectError(error.WrapBackendUnavailable, createMacOsSecureEnclaveSecret(std.testing.allocator, 7, true));
 }
 
-test "secure enclave platform store wraps and unwraps via synthetic provider" {
+test "secure enclave wraps and unwraps via synthetic provider" {
     if (!envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return;
 
     const allocator = std.testing.allocator;
-    const created = try platformStoreWrapSecret(allocator, null, 5, null, .{ .secure_enclave = true, .require_user_presence = true });
+    const created = try createMacOsSecureEnclaveSecret(allocator, 5, true);
     defer freeWrapSecret(allocator, created);
     defer deleteMacOsSecureEnclaveSecret(allocator, created.secret_ref.?) catch {};
     try std.testing.expect(isMacOsSecureEnclaveSecretRef(created.secret_ref.?));
@@ -3964,13 +3958,13 @@ test "secure enclave platform store wraps and unwraps via synthetic provider" {
     try std.testing.expect(blob.ciphertext_b64.len > 0);
 
     var dek: [dek_len]u8 = [_]u8{0x5a} ** dek_len;
-    const record = try wrapDekForBackend(allocator, "platform-secure-store", 5, created.secret, &dek, created);
+    const record = try wrapDekForBackend(allocator, "macos-secure-enclave", 5, created.secret, &dek, created);
     defer freeWrappedDekRecord(allocator, record);
     try std.testing.expectEqualStrings(hkdf_sha256_kdf_name, record.kdf.?);
     try std.testing.expectEqual(true, record.require_user_presence.?);
     try std.testing.expect(record.secure_enclave_ephemeral_pub_b64 != null);
 
-    const loaded = try platformStoreWrapSecret(allocator, null, record.key_version, record, .{});
+    const loaded = try loadMacOsSecureEnclaveSecret(allocator, record.secret_ref.?, record.key_version, record.secure_enclave_ephemeral_pub_b64.?, record.require_user_presence orelse false);
     defer freeWrapSecret(allocator, loaded);
     try std.testing.expectEqualStrings(created.secret, loaded.secret);
 
@@ -3993,14 +3987,15 @@ test "secure enclave synthetic provider still unwraps legacy records without loc
     defer allocator.free(ephemeral_pub_b64);
 
     var dek: [dek_len]u8 = [_]u8{0x6b} ** dek_len;
-    const record = try wrapDekForBackend(allocator, "platform-secure-store", 51, legacy_secret, &dek, .{
+    const record = try wrapDekForBackend(allocator, "macos-secure-enclave", 51, legacy_secret, &dek, .{
         .secret = legacy_secret,
         .secret_ref = secret_ref,
         .secure_enclave_ephemeral_pub_b64 = ephemeral_pub_b64,
+        .require_user_presence = false,
     });
     defer freeWrappedDekRecord(allocator, record);
 
-    const loaded = try platformStoreWrapSecret(allocator, null, record.key_version, record, .{});
+    const loaded = try loadMacOsSecureEnclaveSecret(allocator, record.secret_ref.?, record.key_version, record.secure_enclave_ephemeral_pub_b64.?, record.require_user_presence orelse false);
     defer freeWrapSecret(allocator, loaded);
     try std.testing.expectEqualStrings(legacy_secret, loaded.secret);
     try std.testing.expectEqualStrings(secret_ref, loaded.secret_ref.?);
