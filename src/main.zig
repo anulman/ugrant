@@ -3810,24 +3810,24 @@ test "macos secure enclave secret refs are strict and versioned" {
 test "macos secure enclave helper failure reasons parse from structured JSON" {
     const allocator = std.testing.allocator;
 
-    try std.testing.expectEqual(
-        MacOsSecureEnclaveFailureReason.user_cancelled,
-        parseMacOsSecureEnclaveFailureReasonFromJson(allocator, "{\"reason\":\"user_cancelled\",\"message\":\"cancelled\"}").?,
-    );
-    try std.testing.expectEqual(
-        MacOsSecureEnclaveFailureReason.key_missing,
-        parseMacOsSecureEnclaveFailureReasonFromJson(allocator, "{\"reason\":\"key_missing\"}").?,
-    );
-    try std.testing.expectEqual(
-        MacOsSecureEnclaveFailureReason.access_denied,
-        parseMacOsSecureEnclaveFailureReasonFromJson(allocator, "{\"reason\":\"access_denied\"}").?,
-    );
-    try std.testing.expectEqual(
-        MacOsSecureEnclaveFailureReason.unavailable,
-        parseMacOsSecureEnclaveFailureReasonFromJson(allocator, "{\"reason\":\"unavailable\"}").?,
-    );
-    try std.testing.expect(parseMacOsSecureEnclaveFailureReasonFromJson(allocator, "{\"reason\":\"mystery\"}") == null);
-    try std.testing.expect(parseMacOsSecureEnclaveFailureReasonFromJson(allocator, "not json") == null);
+    const cancelled = parseMacOsSecureEnclaveFailureFromJson(allocator, "{\"reason\":\"user_cancelled\",\"message\":\"cancelled\"}").?;
+    defer freeMacOsSecureEnclaveFailure(allocator, cancelled);
+    try std.testing.expectEqual(MacOsSecureEnclaveFailureReason.user_cancelled, cancelled.reason);
+
+    const key_missing = parseMacOsSecureEnclaveFailureFromJson(allocator, "{\"reason\":\"key_missing\"}").?;
+    defer freeMacOsSecureEnclaveFailure(allocator, key_missing);
+    try std.testing.expectEqual(MacOsSecureEnclaveFailureReason.key_missing, key_missing.reason);
+
+    const access_denied = parseMacOsSecureEnclaveFailureFromJson(allocator, "{\"reason\":\"access_denied\"}").?;
+    defer freeMacOsSecureEnclaveFailure(allocator, access_denied);
+    try std.testing.expectEqual(MacOsSecureEnclaveFailureReason.access_denied, access_denied.reason);
+
+    const unavailable = parseMacOsSecureEnclaveFailureFromJson(allocator, "{\"reason\":\"unavailable\"}").?;
+    defer freeMacOsSecureEnclaveFailure(allocator, unavailable);
+    try std.testing.expectEqual(MacOsSecureEnclaveFailureReason.unavailable, unavailable.reason);
+
+    try std.testing.expect(parseMacOsSecureEnclaveFailureFromJson(allocator, "{\"reason\":\"mystery\"}") == null);
+    try std.testing.expect(parseMacOsSecureEnclaveFailureFromJson(allocator, "not json") == null);
 }
 
 test "doctor secure enclave failure messages stay specific" {
