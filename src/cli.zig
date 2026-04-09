@@ -1,6 +1,8 @@
 const std = @import("std");
+const build_options = @import("build_options");
 
-pub const version = "0.2.0";
+pub const baseline_version = "0.2.0";
+pub const version = build_options.version;
 
 pub const usage_text =
     \\ugrant — portable OAuth 2.0 token broker and exec wrapper

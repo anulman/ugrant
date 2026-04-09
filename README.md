@@ -38,6 +38,12 @@ Build:
 zig build -Doptimize=ReleaseSafe
 ```
 
+To stamp a specific artifact version into the binary, pass `-Dversion=...` at build time:
+
+```bash
+zig build -Doptimize=ReleaseSafe -Dversion=v0.2.0-alpha.2
+```
+
 Test:
 
 ```bash

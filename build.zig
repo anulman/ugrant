@@ -22,6 +22,10 @@ fn addPlatformLibs(step: *std.Build.Step.Compile, target: std.Build.ResolvedTarg
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const version = b.option([]const u8, "version", "Override the reported ugrant version string") orelse "0.2.0";
+
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", version);
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -29,6 +33,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    exe_mod.addImport("build_options", build_options.createModule());
 
     const exe = b.addExecutable(.{
         .name = "ugrant",
@@ -51,6 +56,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    test_mod.addImport("build_options", build_options.createModule());
 
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
