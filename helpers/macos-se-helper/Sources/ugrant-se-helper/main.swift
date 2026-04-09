@@ -106,29 +106,39 @@ func createEphemeralPrivateKey() -> SecKey {
     return key
 }
 func createSecureEnclavePrivateKey(tag: String, requireUserPresence: Bool) -> SecKey {
-    deleteKey(tag: tag)
     var accessError: Unmanaged<CFError>?
     var flags: SecAccessControlCreateFlags = [.privateKeyUsage]
     if requireUserPresence { flags.insert(.userPresence) }
     guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &accessError) else {
-        fail("SecAccessControlCreateWithFlags failed: \(secError(accessError))")
+        let failure = secError(accessError)
+        fail("SecAccessControlCreateWithFlags failed: \(failure.message)", reason: failure.reason)
     }
+    let privateKeyAttrs: [String: Any] = [
+        kSecAttrIsPermanent as String: true,
+        kSecAttrApplicationTag as String: Data(tag.utf8),
+        kSecAttrAccessControl as String: access,
+    ]
     let attrs: [String: Any] = [
         kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
         kSecAttrKeySizeInBits as String: 256,
         kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-        kSecPrivateKeyAttrs as String: [
-            kSecAttrIsPermanent as String: true,
-            kSecAttrApplicationTag as String: Data(tag.utf8),
-            kSecAttrAccessControl as String: access,
-        ],
+        kSecPrivateKeyAttrs as String: privateKeyAttrs,
     ]
     var error: Unmanaged<CFError>?
-    guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) else {
-        let failure = secError(error)
-        fail("secure enclave key generation failed: \(failure.message)", reason: failure.reason)
+    if let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) {
+        return key
     }
-    return key
+
+    let failure = secError(error)
+    if (error?.takeUnretainedValue() as Error?) as NSError? != nil {
+        deleteKey(tag: tag)
+        error = nil
+        if let retryKey = SecKeyCreateRandomKey(attrs as CFDictionary, &error) {
+            return retryKey
+        }
+    }
+    let retryFailure = secError(error)
+    fail("secure enclave key generation failed: initial=\(failure.message); retry=\(retryFailure.message)", reason: retryFailure.reason)
 }
 func loadSecureEnclavePrivateKey(tag: String) -> SecKey {
     let query: [String: Any] = [
