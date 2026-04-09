@@ -499,12 +499,16 @@ test "platform secure store is always available on macos" {
     if (builtin.os.tag != .macos) return;
 
     try std.testing.expect(backendAvailable(std.testing.allocator, "platform-secure-store"));
-    try std.testing.expectEqualStrings("platform-secure-store", try chooseInitBackend(std.testing.allocator, null, false));
+    try std.testing.expectEqualStrings("macos-secure-enclave", try chooseInitBackend(std.testing.allocator, null, false));
 }
 
-test "default backend selection prefers explicit platform store over enclave unless requested" {
+test "default backend selection prefers strongest available backend" {
     try std.testing.expectEqualStrings("tpm2", try resolveBackendChoice(null, false, true, true, true));
-    try std.testing.expectEqualStrings("platform-secure-store", try resolveBackendChoice(null, false, false, true, true));
+    if (builtin.os.tag == .macos) {
+        try std.testing.expectEqualStrings("macos-secure-enclave", try resolveBackendChoice(null, false, false, true, true));
+    } else {
+        try std.testing.expectEqualStrings("platform-secure-store", try resolveBackendChoice(null, false, false, true, true));
+    }
     try std.testing.expectEqualStrings("platform-secure-store", try resolveBackendChoice(null, false, false, true, false));
     try std.testing.expectEqualStrings("macos-secure-enclave", try resolveBackendChoice(null, false, false, false, true));
     try std.testing.expectEqualStrings("passphrase", try resolveBackendChoice(null, false, false, false, false));
