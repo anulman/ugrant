@@ -2096,7 +2096,7 @@ fn loadMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, secret_ref
             .require_user_presence = require_user_presence,
         } };
     }
-    if (builtin.os.tag != .macos) return .{ .failure = .unavailable };
+    if (builtin.os.tag != .macos) return .{ .failure = .{ .reason = .unavailable } };
 
     const result = try runMacOsSecureEnclaveHelperDetailed(allocator, &.{ "load", parsed.tag, ephemeral_pub_b64 });
     return switch (result) {
@@ -2129,8 +2129,8 @@ fn unwrapMacOsSecureEnclaveDekForDoctor(allocator: std.mem.Allocator, record: Wr
     const result = try loadMacOsSecureEnclaveSecretDetailed(allocator, secret_ref, record.key_version, ephemeral_pub_b64, record.require_user_presence orelse false);
     const wrap = switch (result) {
         .success => |wrap| wrap,
-        .failure => |reason| {
-            try err.writeAll(macOsSecureEnclaveDoctorFailureMessage(reason));
+        .failure => |failure| {
+            try err.writeAll(macOsSecureEnclaveDoctorFailureMessage(failure.reason));
             std.process.exit(1);
         },
     };
