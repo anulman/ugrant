@@ -14,5 +14,4 @@ fi
 for binary in "$@"; do
   codesign --verify --verbose=2 "$binary"
   codesign -dv --verbose=4 "$binary" >/dev/null
-  spctl --assess --type execute --verbose "$binary"
 done

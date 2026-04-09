@@ -34,6 +34,7 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
       MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+      MINISIGN_SECRET_KEY_B64: ${{ secrets.MINISIGN_SECRET_KEY_B64 }}
 
     steps:
       - name: Check out
@@ -170,8 +171,11 @@ jobs:
             $archive = $_.FullName
             $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
             "$hash  $($_.Name)" | Set-Content -NoNewline "$archive.sha256"
-            if ($env:MINISIGN_SECRET_KEY) {
-              $keyPath = Join-Path $env:RUNNER_TEMP 'minisign.key'
+            $keyPath = Join-Path $env:RUNNER_TEMP 'minisign.key'
+            if ($env:MINISIGN_SECRET_KEY_B64) {
+              [System.IO.File]::WriteAllBytes($keyPath, [System.Convert]::FromBase64String($env:MINISIGN_SECRET_KEY_B64))
+              minisign -S -s $keyPath -m $archive -x "$archive.minisig"
+            } elseif ($env:MINISIGN_SECRET_KEY) {
               Set-Content -Path $keyPath -Value $env:MINISIGN_SECRET_KEY -NoNewline
               minisign -S -s $keyPath -m $archive -x "$archive.minisig"
             }
