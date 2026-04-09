@@ -2011,7 +2011,7 @@ fn runMacOsSecureEnclaveHelper(allocator: std.mem.Allocator, argv: []const []con
     const result = try runMacOsSecureEnclaveHelperDetailed(allocator, argv);
     return switch (result) {
         .success => |wrap| wrap,
-        .failure => |reason| macOsSecureEnclaveFailureError(reason),
+        .failure => |failure| macOsSecureEnclaveFailureError(failure.reason),
     };
 }
 
