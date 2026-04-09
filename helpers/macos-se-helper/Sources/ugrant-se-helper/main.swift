@@ -201,14 +201,21 @@ func publicKeyFromData(_ data: Data) -> SecKey {
     }
     return key
 }
+func keyExchangeContext() -> LAContext {
+    let context = LAContext()
+    context.interactionNotAllowed = false
+    return context
+}
 func sharedSecret(privateKey: SecKey, publicKey: SecKey) -> Data {
     let algorithm = SecKeyAlgorithm.ecdhKeyExchangeStandard
     guard SecKeyIsAlgorithmSupported(privateKey, .keyExchange, algorithm) else {
         fail("ECDH key exchange is not supported for this key", reason: "unavailable")
     }
     var error: Unmanaged<CFError>?
-    let params: [CFString: Any] = [kSecUseAuthenticationUI: kSecUseAuthenticationUIAllow]
-    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params as CFDictionary, &error) as Data? else {
+    let context = keyExchangeContext()
+    let params = NSMutableDictionary()
+    params[kSecUseAuthenticationContext] = context
+    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params, &error) as Data? else {
         let failure = secError(error)
         fail("key exchange failed: \(failure.message)", reason: failure.reason)
     }
@@ -220,12 +227,12 @@ func wrapKey(privateKey: SecKey, publicKey: SecKey) -> SymmetricKey {
         fail("ECDH X9.63 SHA-256 key exchange is not supported for this key", reason: "unavailable")
     }
     var error: Unmanaged<CFError>?
-    let params: [CFString: Any] = [
-        kSecKeyKeyExchangeParameterRequestedSize: 32,
-        kSecKeyKeyExchangeParameterSharedInfo: wrapMaterialInfo,
-        kSecUseAuthenticationUI: kSecUseAuthenticationUIAllow,
-    ]
-    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params as CFDictionary, &error) as Data? else {
+    let context = keyExchangeContext()
+    let params = NSMutableDictionary()
+    params[kSecKeyKeyExchangeParameterRequestedSize] = 32
+    params[kSecKeyKeyExchangeParameterSharedInfo] = wrapMaterialInfo
+    params[kSecUseAuthenticationContext] = context
+    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params, &error) as Data? else {
         let failure = secError(error)
         fail("wrap key derivation failed: \(failure.message)", reason: failure.reason)
     }
