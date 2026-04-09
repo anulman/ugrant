@@ -1117,11 +1117,17 @@ fn unwrapDek(allocator: std.mem.Allocator, record: WrappedDekRecord) ![]u8 {
     return unwrapDekWithSecret(allocator, record, passphrase.secret);
 }
 
-fn wrapSecretForBackend(allocator: std.mem.Allocator, backend: []const u8, prompt: []const u8, keys_path: ?[]const u8, key_version: ?u32, record: ?WrappedDekRecord) !WrapSecret {
+const WrapSecretForBackendError = error{
+    MacOsSecureEnclaveUserCancelled,
+    MacOsSecureEnclaveKeyMissing,
+    MacOsSecureEnclaveAccessDenied,
+} || anyerror;
+
+fn wrapSecretForBackend(allocator: std.mem.Allocator, backend: []const u8, prompt: []const u8, keys_path: ?[]const u8, key_version: ?u32, record: ?WrappedDekRecord) WrapSecretForBackendError!WrapSecret {
     return wrapSecretForBackendWithOptions(allocator, backend, prompt, keys_path, key_version, record, .{});
 }
 
-fn wrapSecretForBackendWithOptions(allocator: std.mem.Allocator, backend: []const u8, prompt: []const u8, keys_path: ?[]const u8, key_version: ?u32, record: ?WrappedDekRecord, options: WrapBackendOptions) !WrapSecret {
+fn wrapSecretForBackendWithOptions(allocator: std.mem.Allocator, backend: []const u8, prompt: []const u8, keys_path: ?[]const u8, key_version: ?u32, record: ?WrappedDekRecord, options: WrapBackendOptions) WrapSecretForBackendError!WrapSecret {
     if (std.mem.eql(u8, backend, "insecure-keyfile")) return .{ .secret = try allocator.dupe(u8, "insecure-local-keyfile") };
     if (std.mem.eql(u8, backend, "passphrase")) return .{ .secret = try promptSecret(allocator, prompt) };
     if (std.mem.eql(u8, backend, "platform-secure-store")) return platformStoreWrapSecret(allocator, keys_path, key_version, record, options);
