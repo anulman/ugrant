@@ -13,6 +13,7 @@ const wrapped_backend = @import("wrapped_backend.zig");
 const c = @cImport({
     @cInclude("sqlite3.h");
     if (builtin.os.tag != .windows) {
+        @cInclude("poll.h");
         @cInclude("termios.h");
         @cInclude("unistd.h");
     } else {
@@ -52,6 +53,7 @@ const macos_keychain_secret_ref_prefix = "macos-keychain:service=";
 const macos_keychain_account_marker = ";account=";
 const macos_secure_enclave_application_tag_prefix = "dev.ugrant.secure-enclave.dek:";
 const macos_secure_enclave_secret_ref_prefix = "macos-secure-enclave:tag=";
+const macos_secure_enclave_helper_tool = "ugrant-se-helper";
 const macos_security_tool = "/usr/bin/security";
 const macos_xcrun_tool = "/usr/bin/xcrun";
 const schema_version = 3;
@@ -443,8 +445,11 @@ fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     defer allocator.free(auth_url);
 
     try out.print("Open this URL and authorize:\n{s}\n\n", .{auth_url});
-    if (!opts.no_open) {
-        try maybeOpenUrl(auth_url);
+    const open_result: OpenUrlResult = if (opts.no_open) .disabled else maybeOpenUrl(auth_url);
+    switch (open_result) {
+        .launched => try out.writeAll("Attempted to open the authorization URL in your browser.\n\n"),
+        .unavailable => try out.writeAll("No browser opener was available, continuing with manual login.\n\n"),
+        .disabled => {},
     }
 
     var final_code: ?[]u8 = if (opts.code_override) |v| try allocator.dupe(u8, v) else null;
@@ -459,9 +464,19 @@ fn cmdLogin(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
             };
         }
     }
-    if (final_code == null and isLoopbackRedirect(profile.redirect_uri)) {
-        final_code = waitForLoopbackCode(allocator, profile.redirect_uri, oauth_state) catch null;
-        if (final_code != null) try out.writeAll("localhost callback received\n");
+    if (final_code == null and open_result == .launched and isLoopbackRedirect(profile.redirect_uri) and builtin.os.tag != .windows) {
+        final_code = waitForLoopbackOrManualCode(allocator, profile.redirect_uri, oauth_state, opts.allow_unsafe_bare_code, out) catch |e| switch (e) {
+            error.InvalidOAuthState => {
+                try err.writeAll("ugrant login: pasted redirect URL had the wrong OAuth state, restart login and try again\n");
+                std.process.exit(1);
+            },
+            error.UnsafeBareCodeRequiresFlag => {
+                try err.writeAll("ugrant login: bare auth codes skip OAuth state validation, rerun with --unsafe-bare-code if you must use one\n");
+                std.process.exit(2);
+            },
+            else => return e,
+        };
+        if (final_code != null) try out.writeAll("login input received\n");
     }
     if (final_code == null) {
         if (opts.allow_unsafe_bare_code) {
@@ -1564,7 +1579,32 @@ const macos_secure_enclave_helper_script =
 fn secureEnclaveAvailable(allocator: std.mem.Allocator) bool {
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return true;
     if (builtin.os.tag != .macos) return false;
+    if (resolveMacOsSecureEnclaveHelperPath(allocator) != null) return true;
     return commandExists(allocator, "xcrun");
+}
+
+fn resolveMacOsSecureEnclaveHelperPath(allocator: std.mem.Allocator) ?[]u8 {
+    if (builtin.os.tag != .macos) return null;
+
+    const env_override = getEnvVarOwnedOrNull(allocator, "UGRANT_MACOS_SE_HELPER") catch return null;
+    if (env_override) |path| {
+        if (fileExists(path) catch false) return path;
+        allocator.free(path);
+    }
+
+    const self_path = std.fs.selfExePathAlloc(allocator) catch null;
+    if (self_path) |exe_path| {
+        defer allocator.free(exe_path);
+        const exe_dir = std.fs.path.dirname(exe_path) orelse ".";
+        const sibling = std.fs.path.join(allocator, &.{ exe_dir, macos_secure_enclave_helper_tool }) catch return null;
+        if (fileExists(sibling) catch false) return sibling;
+        allocator.free(sibling);
+    }
+
+    if (commandExists(allocator, macos_secure_enclave_helper_tool)) {
+        return allocator.dupe(u8, macos_secure_enclave_helper_tool) catch null;
+    }
+    return null;
 }
 
 fn formatMacOsSecureEnclaveApplicationTag(allocator: std.mem.Allocator, key_version: u32) ![]u8 {
@@ -1807,7 +1847,22 @@ fn macOsSecureEnclaveDoctorFailureMessage(reason: MacOsSecureEnclaveFailureReaso
 }
 
 fn runMacOsSecureEnclaveHelperDetailed(allocator: std.mem.Allocator, argv: []const []const u8) !MacOsSecureEnclaveHelperResult {
-    const result = runChildWithInput(allocator, argv, macos_secure_enclave_helper_script, 16 * 1024) catch return .{ .failure = .unavailable };
+    const result = blk: {
+        if (resolveMacOsSecureEnclaveHelperPath(allocator)) |helper_path| {
+            defer allocator.free(helper_path);
+            var helper_argv = std.ArrayList([]const u8){};
+            defer helper_argv.deinit(allocator);
+            try helper_argv.append(allocator, helper_path);
+            try helper_argv.appendSlice(allocator, argv);
+            break :blk runChildWithInput(allocator, helper_argv.items, "", 16 * 1024) catch return .{ .failure = .unavailable };
+        }
+
+        var fallback_argv = std.ArrayList([]const u8){};
+        defer fallback_argv.deinit(allocator);
+        try fallback_argv.appendSlice(allocator, &.{ macos_xcrun_tool, "swift", "-" });
+        try fallback_argv.appendSlice(allocator, argv);
+        break :blk runChildWithInput(allocator, fallback_argv.items, macos_secure_enclave_helper_script, 16 * 1024) catch return .{ .failure = .unavailable };
+    };
     defer allocator.free(result.stderr);
     switch (result.term) {
         .Exited => |code| if (code != 0) {
@@ -1866,7 +1921,7 @@ fn createMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, key_version: u32
 
     const key_version_text = try std.fmt.allocPrint(allocator, "{}", .{key_version});
     defer allocator.free(key_version_text);
-    return runMacOsSecureEnclaveHelper(allocator, &.{ macos_xcrun_tool, "swift", "-", "create", key_version_text, if (require_user_presence) "1" else "0" });
+    return runMacOsSecureEnclaveHelper(allocator, &.{ "create", key_version_text, if (require_user_presence) "1" else "0" });
 }
 
 fn loadMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []const u8, expected_key_version: u32, ephemeral_pub_b64: []const u8, require_user_presence: bool) !WrapSecret {
@@ -1887,7 +1942,7 @@ fn loadMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []cons
     }
     if (builtin.os.tag != .macos) return error.WrapBackendUnavailable;
 
-    var wrap = try runMacOsSecureEnclaveHelper(allocator, &.{ macos_xcrun_tool, "swift", "-", "load", parsed.tag, ephemeral_pub_b64 });
+    var wrap = try runMacOsSecureEnclaveHelper(allocator, &.{ "load", parsed.tag, ephemeral_pub_b64 });
     errdefer freeWrapSecret(allocator, wrap);
     if (wrap.secure_enclave_ephemeral_pub_b64 == null) {
         wrap.secure_enclave_ephemeral_pub_b64 = try allocator.dupe(u8, ephemeral_pub_b64);
@@ -1914,7 +1969,7 @@ fn loadMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, secret_ref
     }
     if (builtin.os.tag != .macos) return .{ .failure = .unavailable };
 
-    const result = try runMacOsSecureEnclaveHelperDetailed(allocator, &.{ macos_xcrun_tool, "swift", "-", "load", parsed.tag, ephemeral_pub_b64 });
+    const result = try runMacOsSecureEnclaveHelperDetailed(allocator, &.{ "load", parsed.tag, ephemeral_pub_b64 });
     return switch (result) {
         .failure => |reason| .{ .failure = reason },
         .success => |wrap| blk: {
@@ -1966,7 +2021,13 @@ fn deleteMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []co
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return deleteSecureEnclaveTestBlob(allocator, parsed.tag);
     if (builtin.os.tag != .macos) return error.WrapBackendUnavailable;
 
-    const result = runChildWithInput(allocator, &.{ macos_xcrun_tool, "swift", "-", "delete", parsed.tag }, macos_secure_enclave_helper_script, 4096) catch return error.WrapBackendUnavailable;
+    const result = blk: {
+        if (resolveMacOsSecureEnclaveHelperPath(allocator)) |helper_path| {
+            defer allocator.free(helper_path);
+            break :blk runChildWithInput(allocator, &.{ helper_path, "delete", parsed.tag }, "", 4096) catch return error.WrapBackendUnavailable;
+        }
+        break :blk runChildWithInput(allocator, &.{ macos_xcrun_tool, "swift", "-", "delete", parsed.tag }, macos_secure_enclave_helper_script, 4096) catch return error.WrapBackendUnavailable;
+    };
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     switch (result.term) {
@@ -2831,12 +2892,46 @@ fn urlDecodeAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn maybeOpenUrl(url: []const u8) !void {
-    var proc = std.process.Child.init(&.{ "xdg-open", url }, std.heap.page_allocator);
+const OpenUrlResult = enum {
+    launched,
+    unavailable,
+    disabled,
+};
+
+fn spawnDetached(argv: []const []const u8) bool {
+    var proc = std.process.Child.init(argv, std.heap.page_allocator);
     proc.stdin_behavior = .Ignore;
     proc.stdout_behavior = .Ignore;
     proc.stderr_behavior = .Ignore;
-    proc.spawn() catch {};
+    proc.spawn() catch return false;
+    return true;
+}
+
+fn maybeOpenUrl(url: []const u8) OpenUrlResult {
+    switch (builtin.os.tag) {
+        .macos => {
+            if (spawnDetached(&.{ "/usr/bin/open", url })) return .launched;
+            if (spawnDetached(&.{ "open", url })) return .launched;
+        },
+        .linux => {
+            if (spawnDetached(&.{ "xdg-open", url })) return .launched;
+            if (spawnDetached(&.{ "gio", "open", url })) return .launched;
+            if (spawnDetached(&.{ "sensible-browser", url })) return .launched;
+            if (spawnDetached(&.{ "gnome-open", url })) return .launched;
+            if (spawnDetached(&.{ "kde-open", url })) return .launched;
+            if (spawnDetached(&.{ "kde-open5", url })) return .launched;
+            if (spawnDetached(&.{ "firefox", url })) return .launched;
+            if (spawnDetached(&.{ "google-chrome", url })) return .launched;
+            if (spawnDetached(&.{ "chromium", url })) return .launched;
+            if (spawnDetached(&.{ "brave-browser", url })) return .launched;
+        },
+        .windows => {
+            if (spawnDetached(&.{ "rundll32.exe", "url.dll,FileProtocolHandler", url })) return .launched;
+            if (spawnDetached(&.{ "cmd.exe", "/c", "start", "", url })) return .launched;
+        },
+        else => {},
+    }
+    return .unavailable;
 }
 
 fn isLoopbackRedirect(redirect_uri: []const u8) bool {
@@ -2844,7 +2939,25 @@ fn isLoopbackRedirect(redirect_uri: []const u8) bool {
 }
 
 fn waitForLoopbackCode(allocator: std.mem.Allocator, redirect_uri: []const u8, expected_state: []const u8) ![]u8 {
-    const script =
+    const result = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "python3", "-c", loopbackCallbackScript(), redirect_uri, expected_state }, .max_output_bytes = 4096 });
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .Exited => |code| if (code != 0 or std.mem.trim(u8, result.stdout, "\r\n\t ").len == 0) {
+            allocator.free(result.stdout);
+            return error.LoopbackCallbackFailed;
+        },
+        else => {
+            allocator.free(result.stdout);
+            return error.LoopbackCallbackFailed;
+        },
+    }
+    const code = try allocator.dupe(u8, std.mem.trim(u8, result.stdout, "\r\n\t "));
+    allocator.free(result.stdout);
+    return code;
+}
+
+fn loopbackCallbackScript() []const u8 {
+    return
         "import sys, urllib.parse, http.server\n" ++
         "u = urllib.parse.urlparse(sys.argv[1])\nstate = sys.argv[2]\n" ++
         "class H(http.server.BaseHTTPRequestHandler):\n" ++
@@ -2860,21 +2973,81 @@ fn waitForLoopbackCode(allocator: std.mem.Allocator, redirect_uri: []const u8, e
         "srv = http.server.ThreadingHTTPServer((u.hostname, u.port), H)\n" ++
         "srv.timeout = 90\nend = __import__('time').time() + 90\n" ++
         "while __import__('time').time() < end:\n  srv.handle_request()\n  break\n";
-    const result = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "python3", "-c", script, redirect_uri, expected_state }, .max_output_bytes = 4096 });
-    defer allocator.free(result.stderr);
-    switch (result.term) {
-        .Exited => |code| if (code != 0 or std.mem.trim(u8, result.stdout, "\r\n\t ").len == 0) {
-            allocator.free(result.stdout);
-            return error.LoopbackCallbackFailed;
-        },
-        else => {
-            allocator.free(result.stdout);
-            return error.LoopbackCallbackFailed;
-        },
+}
+
+fn waitForLoopbackOrManualCode(allocator: std.mem.Allocator, redirect_uri: []const u8, expected_state: []const u8, allow_unsafe_bare_code: bool, out: *std.Io.Writer) ![]u8 {
+    var child = std.process.Child.init(&.{ "python3", "-c", loopbackCallbackScript(), redirect_uri, expected_state }, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    try child.spawn();
+    errdefer {
+        _ = child.kill() catch {};
+        _ = child.wait() catch {};
     }
-    const code = try allocator.dupe(u8, std.mem.trim(u8, result.stdout, "\r\n\t "));
-    allocator.free(result.stdout);
-    return code;
+
+    if (allow_unsafe_bare_code) {
+        try out.print("Waiting up to 90s for localhost callback on {s}.\nYou can also paste the redirect URL or final code now, whichever is faster: ", .{redirect_uri});
+    } else {
+        try out.print("Waiting up to 90s for localhost callback on {s}.\nYou can also paste the full redirect URL now if you want to skip the wait: ", .{redirect_uri});
+    }
+    try out.flush();
+
+    var stdin_buf: [4096]u8 = undefined;
+    var stdin_len: usize = 0;
+    var callback_buf: [4096]u8 = undefined;
+    var callback_len: usize = 0;
+    const stdin_fd: c_int = @intCast(std.fs.File.stdin().handle);
+    const callback_fd: c_int = @intCast(child.stdout.?.handle);
+    var child_done = false;
+
+    while (true) {
+        var fds = [_]c.pollfd{
+            .{ .fd = stdin_fd, .events = c.POLLIN, .revents = 0 },
+            .{ .fd = if (child_done) -1 else callback_fd, .events = c.POLLIN, .revents = 0 },
+        };
+        const ready = c.poll(&fds, @intCast(fds.len), -1);
+        if (ready < 0) return error.LoopbackCallbackFailed;
+
+        if (!child_done and (fds[1].revents & c.POLLIN) != 0) {
+            const n = try child.stdout.?.read(callback_buf[callback_len..]);
+            if (n == 0) {
+                child_done = true;
+            } else {
+                callback_len += n;
+                const trimmed = std.mem.trim(u8, callback_buf[0..callback_len], "\r\n\t ");
+                if (trimmed.len != 0 and std.mem.indexOfScalar(u8, callback_buf[0..callback_len], '\n') != null) {
+                    _ = child.wait() catch {};
+                    try out.writeAll("\nlocalhost callback received\n");
+                    return allocator.dupe(u8, trimmed);
+                }
+            }
+        }
+        if (!child_done and (fds[1].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
+            child_done = true;
+            _ = child.wait() catch {};
+            if (std.mem.trim(u8, callback_buf[0..callback_len], "\r\n\t ").len != 0) {
+                try out.writeAll("\nlocalhost callback received\n");
+                return allocator.dupe(u8, std.mem.trim(u8, callback_buf[0..callback_len], "\r\n\t "));
+            }
+        }
+
+        if ((fds[0].revents & c.POLLIN) != 0) {
+            const n = try std.fs.File.stdin().read(stdin_buf[stdin_len..]);
+            if (n == 0) continue;
+            stdin_len += n;
+            if (std.mem.indexOfScalar(u8, stdin_buf[0..stdin_len], '\n') != null or std.mem.indexOfScalar(u8, stdin_buf[0..stdin_len], '\r') != null) {
+                const pasted = try allocator.dupe(u8, std.mem.trimRight(u8, stdin_buf[0..stdin_len], "\r\n"));
+                defer freeSecret(allocator, pasted);
+                if (!child_done) {
+                    _ = child.kill() catch {};
+                    _ = child.wait() catch {};
+                }
+                try out.writeAll("\nmanual input received\n");
+                return resolveManualCodeInput(allocator, pasted, expected_state, allow_unsafe_bare_code);
+            }
+        }
+    }
 }
 
 fn runChildWithInput(allocator: std.mem.Allocator, argv: []const []const u8, input: []const u8, max_output_bytes: usize) !std.process.Child.RunResult {
