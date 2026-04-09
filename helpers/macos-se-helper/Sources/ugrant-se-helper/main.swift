@@ -105,7 +105,7 @@ func createEphemeralPrivateKey() -> SecKey {
     }
     return key
 }
-func createSecureEnclavePrivateKey(tag: String, requireUserPresence: Bool) -> SecKey {
+func createSecureEnclavePrivateKey(tag: String, requireUserPresence: Bool, permanent: Bool = true) -> SecKey {
     var accessError: Unmanaged<CFError>?
     let flags: SecAccessControlCreateFlags = requireUserPresence ? [.privateKeyUsage, .userPresence] : [.privateKeyUsage]
     guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &accessError) else {
@@ -113,12 +113,14 @@ func createSecureEnclavePrivateKey(tag: String, requireUserPresence: Bool) -> Se
         fail("SecAccessControlCreateWithFlags failed: \(failure.message)", reason: failure.reason)
     }
 
-    let privateKeyAttrs: [String: Any] = [
-        kSecAttrIsPermanent as String: true,
-        kSecAttrLabel as String: tag,
-        kSecAttrApplicationTag as String: Data(tag.utf8),
+    var privateKeyAttrs: [String: Any] = [
+        kSecAttrIsPermanent as String: permanent,
         kSecAttrAccessControl as String: access,
     ]
+    if permanent {
+        privateKeyAttrs[kSecAttrLabel as String] = tag
+        privateKeyAttrs[kSecAttrApplicationTag as String] = Data(tag.utf8)
+    }
     let attrs: [String: Any] = [
         kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
         kSecAttrKeySizeInBits as String: 256,
@@ -129,7 +131,8 @@ func createSecureEnclavePrivateKey(tag: String, requireUserPresence: Bool) -> Se
     var error: Unmanaged<CFError>?
     guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) else {
         let failure = secError(error)
-        fail("secure enclave key generation failed: \(failure.message)", reason: failure.reason)
+        let permanence = permanent ? "persistent" : "temporary"
+        fail("\(permanence) secure enclave key generation failed: \(failure.message)", reason: failure.reason)
     }
     return key
 }
@@ -293,7 +296,7 @@ case "create":
     guard let keyVersion = Int(args[2]) else { fail("invalid key version") }
     let requireUserPresence = args[3] == "1" || args[3].lowercased() == "true"
     let tag = appTag(keyVersion)
-    let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence)
+    let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence, permanent: true)
     let ephemeralPrivate = createEphemeralPrivateKey()
     let ephemeralPubB64 = publicKeyData(ephemeralPrivate).base64EncodedString()
     let wrapSecret = randomData(32)
@@ -305,6 +308,15 @@ case "create":
         "secret_b64": wrapSecret.base64EncodedString(),
         "secret_ref": "macos-secure-enclave:tag=\(tag)",
         "ephemeral_pub_b64": ephemeralPubB64,
+        "require_user_presence": requireUserPresence,
+    ])
+case "create-temp":
+    if args.count != 3 { fail("usage: create-temp <require-user-presence>") }
+    let requireUserPresence = args[2] == "1" || args[2].lowercased() == "true"
+    let tag = "temp.\(UUID().uuidString)"
+    let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence, permanent: false)
+    emit([
+        "public_key_b64": publicKeyData(SecKeyCopyPublicKey(enclaveKey)!).base64EncodedString(),
         "require_user_presence": requireUserPresence,
     ])
 case "load":
