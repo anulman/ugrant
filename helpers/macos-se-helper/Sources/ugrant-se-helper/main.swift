@@ -107,23 +107,21 @@ func createEphemeralPrivateKey() -> SecKey {
 }
 func createSecureEnclavePrivateKey(tag: String, requireUserPresence: Bool) -> SecKey {
     var accessError: Unmanaged<CFError>?
-    var flags: SecAccessControlCreateFlags = [.privateKeyUsage]
-    if requireUserPresence { flags.insert(.userPresence) }
+    let flags: SecAccessControlCreateFlags = requireUserPresence ? [.privateKeyUsage, .userPresence] : [.privateKeyUsage]
     guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &accessError) else {
         let failure = secError(accessError)
         fail("SecAccessControlCreateWithFlags failed: \(failure.message)", reason: failure.reason)
     }
-    let privateKeyAttrs: [String: Any] = [
-        kSecAttrIsPermanent as String: true,
-        kSecAttrApplicationTag as String: Data(tag.utf8),
-        kSecAttrAccessControl as String: access,
-    ]
+
     let attrs: [String: Any] = [
         kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
         kSecAttrKeySizeInBits as String: 256,
         kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-        kSecPrivateKeyAttrs as String: privateKeyAttrs,
+        kSecAttrIsPermanent as String: true,
+        kSecAttrApplicationTag as String: Data(tag.utf8),
+        kSecAttrAccessControl as String: access,
     ]
+
     var error: Unmanaged<CFError>?
     guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) else {
         let failure = secError(error)
