@@ -221,4 +221,9 @@ jobs:
         run: |
           set -euo pipefail
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "${TITLE:-$TAG}" --notes "Release $TAG"
-          gh release upload "$TAG" dist/* --clobber
+          mapfile -d '' files < <(find dist -maxdepth 1 -type f -print0 | sort -z)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No release files found in dist/"
+            exit 1
+          fi
+          gh release upload "$TAG" "${files[@]}" --clobber

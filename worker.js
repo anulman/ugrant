@@ -3,7 +3,7 @@ const GITHUB_API_LATEST = "https://api.github.com/repos/anulman/ugrant/releases/
 const WWW_HOST = "www.ugrant.sh";
 const SUPPORTED_TARGETS = new Set(["linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64", "windows-x86_64", "windows-arm64"]);
 const MINISIGN_PUBLIC_KEY_COMMENT = "minisign public key for ugrant releases";
-const MINISIGN_PUBLIC_KEY = "RWROMGoscMzrnBn4DAQctEu3E+Y5totRluTj+M/IT0w6ZIuaNjkepTAB";
+const MINISIGN_PUBLIC_KEY = "RWSImn8N0zHirfQkjOQrSx6b2rD6o7rTjiEnoqye4t4Zy6Y6GjNn5Zq7";
 const MINISIGN_PUBLIC_KEY_FILE = `untrusted comment: ${MINISIGN_PUBLIC_KEY_COMMENT}\n${MINISIGN_PUBLIC_KEY}\n`;
 const INSTALL_KIND_SUFFIX = {
   archive: "",
