@@ -113,13 +113,16 @@ func createSecureEnclavePrivateKey(tag: String, requireUserPresence: Bool) -> Se
         fail("SecAccessControlCreateWithFlags failed: \(failure.message)", reason: failure.reason)
     }
 
+    let privateKeyAttrs: [String: Any] = [
+        kSecAttrIsPermanent as String: true,
+        kSecAttrApplicationTag as String: Data(tag.utf8),
+        kSecAttrAccessControl as String: access,
+    ]
     let attrs: [String: Any] = [
         kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
         kSecAttrKeySizeInBits as String: 256,
         kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-        kSecAttrIsPermanent as String: true,
-        kSecAttrApplicationTag as String: Data(tag.utf8),
-        kSecAttrAccessControl as String: access,
+        kSecPrivateKeyAttrs as String: privateKeyAttrs,
     ]
 
     var error: Unmanaged<CFError>?
