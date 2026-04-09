@@ -120,8 +120,21 @@ function archiveExtensionForTarget(target) {
   return TARGET_ARCHIVE_EXTENSION[target] || ".tar.gz";
 }
 
+function releaseTargetName(target) {
+  switch (target) {
+    case "linux-x86_64": return "x86_64-linux";
+    case "linux-aarch64": return "aarch64-linux";
+    case "macos-x86_64": return "x86_64-macos";
+    case "macos-arm64":
+    case "macos-aarch64": return "aarch64-macos";
+    case "windows-x86_64": return "x86_64-windows";
+    case "windows-arm64": return "arm64-windows";
+    default: return target;
+  }
+}
+
 function installArtifactName(tag, target, kind) {
-  return `ugrant-${tag}-${target}${archiveExtensionForTarget(target)}${INSTALL_KIND_SUFFIX[kind]}`;
+  return `ugrant-${tag}-${releaseTargetName(target)}${archiveExtensionForTarget(target)}${INSTALL_KIND_SUFFIX[kind]}`;
 }
 
 function normalizeTarget(target) {
