@@ -781,20 +781,14 @@ fn cmdRekey(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io
     } else if (wrap_options.secure_enclave) {
         target_backend = "macos-secure-enclave";
         target_wrap_options = wrap_options;
-        target_wrap = wrapSecretForBackendWithOptions(allocator, target_backend, "", paths.keys_path, wrapped.key_version + 1, null, target_wrap_options) catch |wrap_err| switch (wrap_err) {
-            error.MacOsSecureEnclaveUserCancelled => {
-                try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .user_cancelled });
+        const detailed = try createMacOsSecureEnclaveSecretDetailed(allocator, wrapped.key_version + 1, wrap_options.require_user_presence);
+        target_wrap = switch (detailed) {
+            .success => |wrap| wrap,
+            .failure => |failure| {
+                defer freeMacOsSecureEnclaveFailure(allocator, failure);
+                try writeMacOsSecureEnclaveFailure(err, "rekey", failure);
                 std.process.exit(1);
             },
-            error.MacOsSecureEnclaveKeyMissing => {
-                try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .key_missing });
-                std.process.exit(1);
-            },
-            error.MacOsSecureEnclaveAccessDenied => {
-                try writeMacOsSecureEnclaveFailure(err, "rekey", .{ .reason = .access_denied });
-                std.process.exit(1);
-            },
-            else => return wrap_err,
         };
     } else if (passphrase_env) |env_name| {
         target_backend = "passphrase";
@@ -2011,11 +2005,14 @@ fn runMacOsSecureEnclaveHelper(allocator: std.mem.Allocator, argv: []const []con
     const result = try runMacOsSecureEnclaveHelperDetailed(allocator, argv);
     return switch (result) {
         .success => |wrap| wrap,
-        .failure => |failure| macOsSecureEnclaveFailureError(failure.reason),
+        .failure => |failure| {
+            defer freeMacOsSecureEnclaveFailure(allocator, failure);
+            return macOsSecureEnclaveFailureError(failure.reason);
+        },
     };
 }
 
-fn createMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, key_version: u32, require_user_presence: bool) !WrapSecret {
+fn createMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, key_version: u32, require_user_presence: bool) !MacOsSecureEnclaveHelperResult {
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) {
         const tag = try formatMacOsSecureEnclaveApplicationTag(allocator, key_version);
         defer allocator.free(tag);
@@ -2039,18 +2036,29 @@ fn createMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, key_version: u32
         errdefer allocator.free(ephemeral_pub_b64);
 
         try saveSyntheticSecureEnclaveWrapSecret(allocator, tag, ephemeral_pub_b64, secret);
-        return .{
+        return .{ .success = .{
             .secret = secret,
             .secret_ref = secret_ref,
             .secure_enclave_ephemeral_pub_b64 = ephemeral_pub_b64,
             .require_user_presence = require_user_presence,
-        };
+        } };
     }
-    if (builtin.os.tag != .macos) return error.WrapBackendUnavailable;
+    if (builtin.os.tag != .macos) return .{ .failure = .{ .reason = .unavailable } };
 
     const key_version_text = try std.fmt.allocPrint(allocator, "{}", .{key_version});
     defer allocator.free(key_version_text);
-    return runMacOsSecureEnclaveHelper(allocator, &.{ "create", key_version_text, if (require_user_presence) "1" else "0" });
+    return runMacOsSecureEnclaveHelperDetailed(allocator, &.{ "create", key_version_text, if (require_user_presence) "1" else "0" });
+}
+
+fn createMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, key_version: u32, require_user_presence: bool) !WrapSecret {
+    const result = try createMacOsSecureEnclaveSecretDetailed(allocator, key_version, require_user_presence);
+    return switch (result) {
+        .success => |wrap| wrap,
+        .failure => |failure| {
+            defer freeMacOsSecureEnclaveFailure(allocator, failure);
+            return macOsSecureEnclaveFailureError(failure.reason);
+        },
+    };
 }
 
 fn loadMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []const u8, expected_key_version: u32, ephemeral_pub_b64: []const u8, require_user_presence: bool) !WrapSecret {
