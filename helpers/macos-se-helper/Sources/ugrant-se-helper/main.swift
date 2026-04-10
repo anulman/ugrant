@@ -323,11 +323,9 @@ func wrapKey(privateKey: SecKey, publicKey: SecKey) -> SymmetricKey {
     }
     var error: Unmanaged<CFError>?
     let context = keyExchangeContext()
-    let params: [SecKeyKeyExchangeParameter: Any] = [
-        .requestedSize: 32,
-        .sharedInfo: wrapMaterialInfo,
-    ]
-    let options = NSMutableDictionary(dictionary: params)
+    let options = NSMutableDictionary()
+    options[kSecKeyKeyExchangeParameterRequestedSize as String] = 32
+    options[kSecKeyKeyExchangeParameterSharedInfo as String] = wrapMaterialInfo
     options[kSecUseAuthenticationContext as String] = context
     guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, options, &error) as Data? else {
         let failure = secError(error)
