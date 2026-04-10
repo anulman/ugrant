@@ -1669,11 +1669,13 @@ const macos_secure_enclave_helper_script =
     "    }\n" ++
     "    var error: Unmanaged<CFError>?\n" ++
     "    let context = keyExchangeContext()\n" ++
-    "    let params = NSMutableDictionary()\n" ++
-    "    params[kSecKeyKeyExchangeParameterRequestedSize as String] = 32\n" ++
-    "    params[kSecKeyKeyExchangeParameterSharedInfo as String] = wrapMaterialInfo\n" ++
-    "    params[kSecUseAuthenticationContext as String] = context\n" ++
-    "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params, &error) as Data? else {\n" ++
+    "    let params: [SecKeyKeyExchangeParameter: Any] = [\n" ++
+    "        .requestedSize: 32,\n" ++
+    "        .sharedInfo: wrapMaterialInfo,\n" ++
+    "    ]\n" ++
+    "    let options = NSMutableDictionary(dictionary: params)\n" ++
+    "    options[kSecUseAuthenticationContext as String] = context\n" ++
+    "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, options, &error) as Data? else {\n" ++
     "        let failure = secError(error)\n" ++
     "        fail(\"wrap key derivation failed: \\(failure.message)\", reason: failure.reason)\n" ++
     "    }\n" ++
