@@ -12,7 +12,7 @@ It keeps grant material local, encrypts secret fields at rest, refreshes access 
 
 Recent hardening includes Argon2id passphrase wrapping, 0700/0600 secret-state permissions on Unix, state-validated manual login fallback, concurrent refresh leasing, minisign-signed release archives with checksum fallback installs, and bundled SQLite builds across Linux, macOS, and Windows.
 
-On macOS, `platform-secure-store` uses the default login Keychain. On Linux, `platform-secure-store` uses Secret Service when available and still prefers TPM2 when present. On Windows, `platform-secure-store` now uses user-scoped DPAPI for local wrap-secret custody.
+On macOS, `ugrant init` prefers Secure Enclave when available, while `platform-secure-store` remains the plain login-Keychain backend. On Linux, `platform-secure-store` uses Secret Service when available and still prefers TPM2 when present. On Windows, `platform-secure-store` now uses user-scoped DPAPI for local wrap-secret custody.
 
 ## What it does
 
@@ -99,14 +99,14 @@ Both installers prefer minisign verification when `minisign` is available. If no
 ## macOS notes
 
 - Config lives at `~/.config/ugrant/config.toml`. State lives at `~/.local/state/ugrant/` with `state.db` and wrapped key metadata.
-- `ugrant init` on macOS prefers `platform-secure-store`, which now means the default login Keychain. The public backend name stays `platform-secure-store`.
-- When that backend is active, `ugrant status` and `ugrant doctor` print `backend_provider: macOS Keychain`.
+- `ugrant init` on macOS prefers Secure Enclave when it is available. Plain login Keychain remains available as `ugrant init --backend platform-secure-store`.
+- When Secure Enclave is active, `ugrant status` and `ugrant doctor` should report `backend: macos-secure-enclave` and `backend_provider: macOS Secure Enclave`.
 - The wrapped DEK is stored as a login-keychain generic-password item with service `dev.ugrant.platform-secure-store` and account `dek:<key_version>`.
 - Existing passphrase or insecure installs are not silently migrated into Keychain. Move them explicitly with `ugrant rekey --backend platform-secure-store`.
-- Secure Enclave mode is a separate macOS opt-in. Use `ugrant init --secure-enclave` or `ugrant rekey --secure-enclave`, and add `--require-user-presence` only when you want local approval on unwrap.
-- In Secure Enclave mode, the public backend still stays `platform-secure-store`, while `ugrant status` and `ugrant doctor` should report `backend_provider: macOS Secure Enclave`. Plain login Keychain remains the default path when `--secure-enclave` is not set.
+- Secure Enclave mode can still be requested explicitly with `ugrant init --secure-enclave` or `ugrant rekey --secure-enclave`, and `--require-user-presence` still adds local approval on unwrap.
+- Plain login Keychain stays the fallback when Secure Enclave is unavailable, and it remains the explicit non-Enclave macOS backend via `platform-secure-store`.
 - Release builds now ship a single `ugrant` binary. The old `ugrant-se-helper` sidecar is no longer packaged or installed.
-- The current macOS bridge path is inline from `ugrant` itself, with `sc_auth` handling CTK identity lifecycle. Secure Enclave mode is still explicit opt-in and still needs more real-device validation before broader rollout.
+- The current macOS bridge path is inline from `ugrant` itself, with `sc_auth` handling CTK identity lifecycle. `ugrant init` now keeps the freshly created Secure Enclave wrap secret in-process for first-run bootstrap instead of immediately reloading CTK state before the command finishes.
 - `ugrant doctor` now distinguishes a cancelled user-presence prompt from other Secure Enclave failures, while still reporting missing keys, unsupported hardware, and access problems as separate cases.
 - Live Keychain validation still needs a real Mac. After rekey, confirm `status` and `doctor` look right, then inspect the login keychain with Keychain Access or `security find-generic-password -s dev.ugrant.platform-secure-store ~/Library/Keychains/login.keychain-db`.
 
@@ -216,12 +216,12 @@ Those installer scripts exercise fresh install, reinstall, repair-after-clobber,
 For Secure Enclave mode, keep the manual gate on a real Mac separate from the Linux-host smoke scripts:
 
 1. Run `bash scripts/manual-installer-qa-unix.sh` on a real Mac, preferably Apple Silicon first.
-2. On macOS, `ugrant init` should prefer the login Keychain by default. From that fresh install, confirm `ugrant status` / `ugrant doctor` report `backend: platform-secure-store` and `backend_provider: macOS Keychain`.
-3. Then run `ugrant rekey --secure-enclave`, confirm `ugrant status` / `ugrant doctor` report `backend_provider: macOS Secure Enclave`, and confirm the persisted ref in `keys.json` is CTK-backed (`macos-ctk-secure-enclave:label=...;hash=...`).
+2. On macOS with Secure Enclave available, `ugrant init` should prefer it by default. From that fresh install, confirm `ugrant status` / `ugrant doctor` report `backend: macos-secure-enclave` and `backend_provider: macOS Secure Enclave`, and confirm the persisted ref in `keys.json` is CTK-backed (`macos-ctk-secure-enclave:label=...;hash=...`).
+3. Rekey to plain Keychain with `ugrant rekey --backend platform-secure-store`, confirm `ugrant status` / `ugrant doctor` report `backend: platform-secure-store` and `backend_provider: macOS Keychain`, then rekey back to Secure Enclave with `ugrant rekey --secure-enclave`.
 4. Also run `ugrant rekey --secure-enclave --require-user-presence`, confirm `user_presence_required: yes`, and record both an approved access and a cancelled prompt. A cancelled prompt should now surface as its own explicit `doctor` failure.
 5. Rekey back with `ugrant rekey --backend platform-secure-store` and confirm the install returns to plain `backend_provider: macOS Keychain`.
 
-Release-readiness for any broader rollout should mean at least one recorded Apple Silicon pass for that Keychain -> Secure Enclave -> Keychain round-trip, with Secure Enclave remaining an explicit opt-in macOS path.
+Release-readiness for any broader rollout should mean at least one recorded Apple Silicon pass for that Secure Enclave -> Keychain -> Secure Enclave round-trip.
 
 For signed release validation on macOS, also confirm:
 
