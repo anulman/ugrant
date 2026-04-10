@@ -508,11 +508,11 @@ test "platform secure store is always available on windows" {
     try std.testing.expectEqualStrings("platform-secure-store", try chooseInitBackend(std.testing.allocator, null, false));
 }
 
-test "platform secure store is always available on macos" {
+test "macos exposes platform secure store while default init prefers secure enclave" {
     if (builtin.os.tag != .macos) return;
 
     try std.testing.expect(backendAvailable(std.testing.allocator, "platform-secure-store"));
-    try std.testing.expectEqualStrings("platform-secure-store", try chooseInitBackend(std.testing.allocator, null, false));
+    try std.testing.expectEqualStrings("macos-secure-enclave", try chooseInitBackend(std.testing.allocator, null, false));
 }
 
 test "platform secure store availability rules cover macos and windows without host gating" {
