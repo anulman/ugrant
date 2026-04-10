@@ -1783,47 +1783,6 @@ const macos_secure_enclave_helper_script =
     "let args = CommandLine.arguments\n" ++
     "if args.count < 2 { fail(\"missing mode\") }\n" ++
     "switch args[1] {\n" ++
-    "case \"create\":\n" ++
-    "    if args.count != 4 { fail(\"usage: create <key-version> <require-user-presence>\") }\n" ++
-    "    guard let keyVersion = Int(args[2]) else { fail(\"invalid key version\") }\n" ++
-    "    let requireUserPresence = args[3] == \"1\" || args[3].lowercased() == \"true\"\n" ++
-    "    let tag = appTag(keyVersion)\n" ++
-    "    let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence, permanent: true)\n" ++
-    "    let ephemeralPrivate = createEphemeralPrivateKey()\n" ++
-    "    let ephemeralPubB64 = publicKeyData(ephemeralPrivate).base64EncodedString()\n" ++
-    "    let wrapSecret = randomData(32)\n" ++
-    "    let key = wrapKey(privateKey: ephemeralPrivate, publicKey: SecKeyCopyPublicKey(enclaveKey)!)\n" ++
-    "    var payload = sealWrapMaterial(secret: wrapSecret, key: key)\n" ++
-    "    payload[\"ephemeral_pub_b64\"] = ephemeralPubB64\n" ++
-    "    storeWrapMaterial(tag: tag, payload: payload)\n" ++
-    "    emit([\n" ++
-    "        \"secret_b64\": wrapSecret.base64EncodedString(),\n" ++
-    "        \"secret_ref\": \"macos-secure-enclave:tag=\\(tag)\",\n" ++
-    "        \"ephemeral_pub_b64\": ephemeralPubB64,\n" ++
-    "        \"require_user_presence\": requireUserPresence,\n" ++
-    "    ])\n" ++
-    "case \"create-temp\":\n" ++
-    "    if args.count != 3 { fail(\"usage: create-temp <require-user-presence>\") }\n" ++
-    "    let requireUserPresence = args[2] == \"1\" || args[2].lowercased() == \"true\"\n" ++
-    "    let tag = \"temp.\\(UUID().uuidString)\"\n" ++
-    "    let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence, permanent: false)\n" ++
-    "    emit([\n" ++
-    "        \"public_key_b64\": publicKeyData(SecKeyCopyPublicKey(enclaveKey)!).base64EncodedString(),\n" ++
-    "        \"require_user_presence\": requireUserPresence,\n" ++
-    "    ])\n" ++
-    "case \"create-persist-test\":\n" ++
-    "    if args.count != 4 { fail(\"usage: create-persist-test <key-version> <require-user-presence>\") }\n" ++
-    "    guard let keyVersion = Int(args[2]) else { fail(\"invalid key version\") }\n" ++
-    "    let requireUserPresence = args[3] == \"1\" || args[3].lowercased() == \"true\"\n" ++
-    "    let tag = appTag(keyVersion)\n" ++
-    "    let enclaveKey = createSecureEnclavePrivateKey(tag: tag, requireUserPresence: requireUserPresence, permanent: false)\n" ++
-    "    persistSecureEnclavePrivateKey(enclaveKey, tag: tag)\n" ++
-    "    let loaded = loadSecureEnclavePrivateKey(tag: tag)\n" ++
-    "    emit([\n" ++
-    "        \"public_key_b64\": publicKeyData(SecKeyCopyPublicKey(loaded)!).base64EncodedString(),\n" ++
-    "        \"secret_ref\": \"macos-secure-enclave:tag=\\(tag)\",\n" ++
-    "        \"require_user_presence\": requireUserPresence,\n" ++
-    "    ])\n" ++
     "case \"create-ctk\":\n" ++
     "    if args.count != 4 { fail(\"usage: create-ctk <label> <require-user-presence>\") }\n" ++
     "    let label = args[2]\n" ++
@@ -1910,36 +1869,6 @@ const macos_secure_enclave_helper_script =
     "        \"secret_b64\": secret.base64EncodedString(),\n" ++
     "        \"secret_ref\": \"macos-ctk-secure-enclave:label=\\(args[2]);hash=\\(args[3])\",\n" ++
     "    ])\n" ++
-    "case \"load\":\n" ++
-    "    if args.count != 4 { fail(\"usage: load <tag> <ephemeral-pub-b64>\") }\n" ++
-    "    guard let ephemeralPub = Data(base64Encoded: args[3]) else { fail(\"invalid ephemeral public key base64\") }\n" ++
-    "    let enclaveKey = loadSecureEnclavePrivateKey(tag: args[2])\n" ++
-    "    let secret: Data\n" ++
-    "    if let stored = loadWrapMaterial(tag: args[2]) {\n" ++
-    "        let raw: Any\n" ++
-    "        do {\n" ++
-    "            raw = try JSONSerialization.jsonObject(with: stored, options: [])\n" ++
-    "        } catch {\n" ++
-    "            fail(\"wrap material JSON is invalid: \\(error)\")\n" ++
-    "        }\n" ++
-    "        guard let payload = raw as? [String: Any] else {\n" ++
-    "            fail(\"wrap material JSON is invalid\")\n" ++
-    "        }\n" ++
-    "        if let storedEphemeral = payload[\"ephemeral_pub_b64\"] as? String, storedEphemeral != args[3] {\n" ++
-    "            fail(\"stored wrap material does not match wrapped-key metadata\")\n" ++
-    "        }\n" ++
-    "        secret = openWrapMaterial(payload: payload, key: wrapKey(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub)))\n" ++
-    "    } else {\n" ++
-    "        secret = sharedSecret(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))\n" ++
-    "    }\n" ++
-    "    emit([\n" ++
-    "        \"secret_b64\": secret.base64EncodedString(),\n" ++
-    "        \"secret_ref\": \"macos-secure-enclave:tag=\\(args[2])\",\n" ++
-    "    ])\n" ++
-    "case \"delete\":\n" ++
-    "    if args.count != 3 { fail(\"usage: delete <tag>\") }\n" ++
-    "    deleteWrapMaterial(tag: args[2])\n" ++
-    "    deleteKey(tag: args[2])\n" ++
     "case \"delete-ctk-wrap\":\n" ++
     "    if args.count != 3 { fail(\"usage: delete-ctk-wrap <label>\") }\n" ++
     "    deleteWrapMaterial(tag: args[2])\n" ++
@@ -1959,12 +1888,6 @@ fn formatMacOsSecureEnclaveApplicationTag(allocator: std.mem.Allocator, key_vers
 
 fn formatMacOsSecureEnclaveSecretRefForParts(allocator: std.mem.Allocator, label: []const u8, public_key_hash: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}{s};hash={s}", .{ macos_secure_enclave_secret_ref_prefix, label, public_key_hash });
-}
-
-fn formatMacOsSecureEnclaveSecretRef(allocator: std.mem.Allocator, key_version: u32) ![]u8 {
-    const label = try formatMacOsSecureEnclaveApplicationTag(allocator, key_version);
-    defer allocator.free(label);
-    return formatMacOsSecureEnclaveSecretRefForParts(allocator, label, "test-hash");
 }
 
 fn parseMacOsSecureEnclaveSecretRef(secret_ref: []const u8) !MacOsSecureEnclaveRef {
@@ -4211,12 +4134,7 @@ test "macos keychain secret refs reject malformed prefixes and numeric versions"
 }
 
 test "macos secure enclave secret refs are strict and versioned" {
-    const allocator = std.testing.allocator;
-
-    const secret_ref = try formatMacOsSecureEnclaveSecretRef(allocator, 9);
-    defer allocator.free(secret_ref);
-
-    const parsed = try parseMacOsSecureEnclaveSecretRef(secret_ref);
+    const parsed = try parseMacOsSecureEnclaveSecretRef("macos-ctk-secure-enclave:label=dev.ugrant.secure-enclave.dek:9;hash=test-hash");
     try std.testing.expectEqualStrings("dev.ugrant.secure-enclave.dek:9", parsed.label);
     try std.testing.expectEqual(@as(u32, 9), parsed.key_version);
 
@@ -4401,38 +4319,6 @@ test "secure enclave wraps and unwraps via synthetic provider" {
     const loaded = try loadMacOsSecureEnclaveSecret(allocator, record.secret_ref.?, record.key_version, record.secure_enclave_ephemeral_pub_b64.?, record.require_user_presence orelse false);
     defer freeWrapSecret(allocator, loaded);
     try std.testing.expectEqualStrings(created.secret, loaded.secret);
-
-    const unwrapped = try unwrapDekWithSecret(allocator, record, loaded.secret);
-    defer freeSecret(allocator, unwrapped);
-    try std.testing.expectEqualSlices(u8, &dek, unwrapped);
-}
-
-test "secure enclave synthetic provider still unwraps legacy records without local wrap blob" {
-    if (!envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return;
-
-    const allocator = std.testing.allocator;
-    const secret_ref = try formatMacOsSecureEnclaveSecretRef(allocator, 51);
-    defer allocator.free(secret_ref);
-    try deleteMacOsSecureEnclaveSecret(allocator, secret_ref);
-
-    const legacy_secret = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_SECRET", "secure-enclave-test-secret");
-    defer freeSecret(allocator, legacy_secret);
-    const ephemeral_pub_b64 = try getEnvOrDefaultOwned(allocator, "UGRANT_TEST_SECURE_ENCLAVE_EPHEMERAL_PUB_B64", "c2VjdXJlLWVuY2xhdmUtdGVzdC1lcGhlbWVyYWwtcHVi");
-    defer allocator.free(ephemeral_pub_b64);
-
-    var dek: [dek_len]u8 = [_]u8{0x6b} ** dek_len;
-    const record = try wrapDekForBackend(allocator, "macos-secure-enclave", 51, legacy_secret, &dek, .{
-        .secret = legacy_secret,
-        .secret_ref = secret_ref,
-        .secure_enclave_ephemeral_pub_b64 = ephemeral_pub_b64,
-        .require_user_presence = false,
-    });
-    defer freeWrappedDekRecord(allocator, record);
-
-    const loaded = try loadMacOsSecureEnclaveSecret(allocator, record.secret_ref.?, record.key_version, record.secure_enclave_ephemeral_pub_b64.?, record.require_user_presence orelse false);
-    defer freeWrapSecret(allocator, loaded);
-    try std.testing.expectEqualStrings(legacy_secret, loaded.secret);
-    try std.testing.expectEqualStrings(secret_ref, loaded.secret_ref.?);
 
     const unwrapped = try unwrapDekWithSecret(allocator, record, loaded.secret);
     defer freeSecret(allocator, unwrapped);
