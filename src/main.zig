@@ -1450,9 +1450,7 @@ const macos_secure_enclave_helper_script =
     "    let attrs: [String: Any] = [\n" ++
     "        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
     "        kSecAttrKeySizeInBits as String: 256,\n" ++
-    "        kSecPrivateKeyAttrs as String: [\n" ++
-    "            kSecAttrIsPermanent as String: false,\n" ++
-    "        ],\n" ++
+    "        kSecAttrIsPermanent as String: false,\n" ++
     "    ]\n" ++
     "    guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) else {\n" ++
     "        let failure = secError(error)\n" ++
@@ -1663,19 +1661,17 @@ const macos_secure_enclave_helper_script =
     "    return data\n" ++
     "}\n" ++
     "func wrapKey(privateKey: SecKey, publicKey: SecKey) -> SymmetricKey {\n" ++
-    "    let algorithm = SecKeyAlgorithm.ecdhKeyExchangeStandardX963SHA256\n" ++
+    "    let algorithm = SecKeyAlgorithm.ecdhKeyExchangeStandard\n" ++
+    "    debugLog(\"wrapKey start algorithm=\\(algorithm)\")\n" ++
     "    guard SecKeyIsAlgorithmSupported(privateKey, .keyExchange, algorithm) else {\n" ++
-    "        fail(\"ECDH X9.63 SHA-256 key exchange is not supported for this key\", reason: \"unavailable\")\n" ++
+    "        fail(\"ECDH cofactor X9.63 SHA-256 key exchange is not supported for this key\", reason: \"unavailable\")\n" ++
     "    }\n" ++
     "    var error: Unmanaged<CFError>?\n" ++
-    "    let context = keyExchangeContext()\n" ++
-    "    let params: [SecKeyKeyExchangeParameter: Any] = [\n" ++
-    "        .requestedSize: 32,\n" ++
-    "        .sharedInfo: wrapMaterialInfo,\n" ++
+    "    let keySize = 32\n" ++
+    "    let parameters: [SecKeyKeyExchangeParameter: Any] = [\n" ++
+    "        SecKeyKeyExchangeParameter.requestedSize: keySize,\n" ++
     "    ]\n" ++
-    "    let options = NSMutableDictionary(dictionary: params)\n" ++
-    "    options[kSecUseAuthenticationContext as String] = context\n" ++
-    "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, options, &error) as Data? else {\n" ++
+    "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, parameters as CFDictionary, &error) as Data? else {\n" ++
     "        let failure = secError(error)\n" ++
     "        fail(\"wrap key derivation failed: \\(failure.message)\", reason: failure.reason)\n" ++
     "    }\n" ++
