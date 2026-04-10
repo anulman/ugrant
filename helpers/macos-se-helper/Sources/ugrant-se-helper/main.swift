@@ -224,7 +224,7 @@ func findCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> S
             guard let publicKey = SecKeyCopyPublicKey(key) else { continue }
             let hash = publicKeyHashHex(publicKey)
             debugLog("findCtkPrivateKey candidate hash=\(hash)")
-            if let expectedPublicKeyHash, !hash.caseInsensitiveCompare(expectedPublicKeyHash).equals(.orderedSame) {
+            if let expectedPublicKeyHash, hash.caseInsensitiveCompare(expectedPublicKeyHash) != ComparisonResult.orderedSame {
                 continue
             }
             debugLog("findCtkPrivateKey matched candidate hash=\(hash) via query#\(queryIndex + 1)")
