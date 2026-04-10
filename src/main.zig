@@ -2178,13 +2178,7 @@ fn runMacOsSecureEnclaveHelper(allocator: std.mem.Allocator, argv: []const []con
     defer env_map.deinit();
     try env_map.put("UGRANT_SE_DEBUG", "1");
 
-    return std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = full_argv.items,
-        .env_map = &env_map,
-        .stdin = .{ .bytes = macos_secure_enclave_helper_script },
-        .max_output_bytes = 64 * 1024,
-    });
+    return runChildWithEnvAndInput(allocator, full_argv.items, &env_map, macos_secure_enclave_helper_script, 64 * 1024);
 }
 
 fn finishMacOsSecureEnclaveHelperResult(allocator: std.mem.Allocator, result: std.process.Child.RunResult) !MacOsSecureEnclaveHelperResult {
@@ -3458,10 +3452,21 @@ fn waitForLoopbackOrManualCode(allocator: std.mem.Allocator, redirect_uri: []con
 }
 
 fn runChildWithInput(allocator: std.mem.Allocator, argv: []const []const u8, input: []const u8, max_output_bytes: usize) !std.process.Child.RunResult {
+    return runChildWithEnvAndInput(allocator, argv, null, input, max_output_bytes);
+}
+
+fn runChildWithEnvAndInput(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    env_map: ?*std.process.EnvMap,
+    input: []const u8,
+    max_output_bytes: usize,
+) !std.process.Child.RunResult {
     var child = std.process.Child.init(argv, allocator);
     child.stdin_behavior = .Pipe;
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
+    child.env_map = env_map;
 
     var stdout = std.ArrayList(u8).empty;
     defer stdout.deinit(allocator);
