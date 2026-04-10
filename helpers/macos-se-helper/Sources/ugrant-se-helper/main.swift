@@ -177,7 +177,7 @@ func publicKeyHashHex(_ key: SecKey) -> String {
     let digest = SHA256.hash(data: publicKeyData(key))
     return digest.map { String(format: "%02x", $0) }.joined()
 }
-func loadCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> SecKey {
+func findCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> SecKey? {
     let query: [String: Any] = [
         kSecClass as String: kSecClassKey,
         kSecAttrLabel as String: label,
@@ -188,6 +188,7 @@ func loadCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> S
     ]
     var item: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &item)
+    if status == errSecItemNotFound { return nil }
     guard status == errSecSuccess else {
         fail("SecItemCopyMatching CTK key failed: \(status)", reason: reasonForStatus(status))
     }
@@ -206,6 +207,17 @@ func loadCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> S
             continue
         }
         return key
+    }
+    return nil
+}
+func loadCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil, retries: Int = 20, retryDelaySeconds: Double = 0.1) -> SecKey {
+    for attempt in 0...max(0, retries) {
+        if let key = findCtkPrivateKey(label: label, expectedPublicKeyHash: expectedPublicKeyHash) {
+            return key
+        }
+        if attempt < retries {
+            Thread.sleep(forTimeInterval: retryDelaySeconds)
+        }
     }
     fail("CTK key not found for label \(label)", reason: "key_missing")
 }

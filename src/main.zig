@@ -1529,7 +1529,7 @@ const macos_secure_enclave_helper_script =
     "    let digest = SHA256.hash(data: publicKeyData(key))\n" ++
     "    return digest.map { String(format: \"%02x\", $0) }.joined()\n" ++
     "}\n" ++
-    "func loadCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> SecKey {\n" ++
+    "func findCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> SecKey? {\n" ++
     "    let query: [String: Any] = [\n" ++
     "        kSecClass as String: kSecClassKey,\n" ++
     "        kSecAttrLabel as String: label,\n" ++
@@ -1540,6 +1540,7 @@ const macos_secure_enclave_helper_script =
     "    ]\n" ++
     "    var item: CFTypeRef?\n" ++
     "    let status = SecItemCopyMatching(query as CFDictionary, &item)\n" ++
+    "    if status == errSecItemNotFound { return nil }\n" ++
     "    guard status == errSecSuccess else {\n" ++
     "        fail(\"SecItemCopyMatching CTK key failed: \\(status)\", reason: reasonForStatus(status))\n" ++
     "    }\n" ++
@@ -1558,6 +1559,17 @@ const macos_secure_enclave_helper_script =
     "            continue\n" ++
     "        }\n" ++
     "        return key\n" ++
+    "    }\n" ++
+    "    return nil\n" ++
+    "}\n" ++
+    "func loadCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil, retries: Int = 20, retryDelaySeconds: Double = 0.1) -> SecKey {\n" ++
+    "    for attempt in 0...max(0, retries) {\n" ++
+    "        if let key = findCtkPrivateKey(label: label, expectedPublicKeyHash: expectedPublicKeyHash) {\n" ++
+    "            return key\n" ++
+    "        }\n" ++
+    "        if attempt < retries {\n" ++
+    "            Thread.sleep(forTimeInterval: retryDelaySeconds)\n" ++
+    "        }\n" ++
     "    }\n" ++
     "    fail(\"CTK key not found for label \\(label)\", reason: \"key_missing\")\n" ++
     "}\n" ++
