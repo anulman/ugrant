@@ -3004,6 +3004,10 @@ const WindowsHiddenConsoleInput = struct {
     original_mode: c.DWORD,
 };
 
+fn trimPromptInput(input: []const u8) []const u8 {
+    return std.mem.trimRight(u8, input, "\r\n");
+}
+
 fn promptSecret(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
     var stdout_file = std.fs.File.stdout();
     try stdout_file.writeAll(prompt);
@@ -3038,7 +3042,7 @@ fn promptSecret(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
     var stdin_file = std.fs.File.stdin();
     var buf: [4096]u8 = undefined;
     const n = try stdin_file.read(&buf);
-    return allocator.dupe(u8, std.mem.trimRight(u8, buf[0..n], "\r\n"));
+    return allocator.dupe(u8, trimPromptInput(buf[0..n]));
 }
 
 fn enableWindowsHiddenConsoleInput() ?WindowsHiddenConsoleInput {
@@ -3961,6 +3965,14 @@ test "windows platform secure store round trips via DPAPI" {
     defer freeWrapSecret(allocator, loaded);
     try std.testing.expectEqualStrings(created.secret, loaded.secret);
     try std.testing.expectEqualStrings(created.secret_ref.?, loaded.secret_ref.?);
+}
+
+test "windows prompt fallback trims CRLF from redirected input" {
+    if (builtin.os.tag != .windows) return;
+
+    try std.testing.expectEqualStrings("hunter2", trimPromptInput("hunter2\r\n"));
+    try std.testing.expectEqualStrings("hunter2", trimPromptInput("hunter2\n"));
+    try std.testing.expectEqualStrings("", trimPromptInput("\r\n"));
 }
 
 test "macos keychain secret refs are strict and versioned" {
