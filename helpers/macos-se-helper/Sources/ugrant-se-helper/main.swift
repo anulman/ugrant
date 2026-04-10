@@ -322,12 +322,11 @@ func wrapKey(privateKey: SecKey, publicKey: SecKey) -> SymmetricKey {
         fail("ECDH X9.63 SHA-256 key exchange is not supported for this key", reason: "unavailable")
     }
     var error: Unmanaged<CFError>?
-    let context = keyExchangeContext()
-    let options = NSMutableDictionary()
-    options[kSecKeyKeyExchangeParameterRequestedSize as String] = 32
-    options[kSecKeyKeyExchangeParameterSharedInfo as String] = wrapMaterialInfo
-    options[kSecUseAuthenticationContext as String] = context
-    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, options, &error) as Data? else {
+    let params: [SecKeyKeyExchangeParameter: Any] = [
+        SecKeyKeyExchangeParameter.requestedSize: 32,
+        SecKeyKeyExchangeParameter.sharedInfo: wrapMaterialInfo,
+    ]
+    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params as CFDictionary, &error) as Data? else {
         let failure = secError(error)
         fail("wrap key derivation failed: \(failure.message)", reason: failure.reason)
     }
