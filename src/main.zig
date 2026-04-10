@@ -287,10 +287,14 @@ fn cmdInit(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.
     try ensureParentDirs(paths);
     try ensureConfig(paths.config_path);
 
-    const wrapped = try initOrLoadKeys(allocator, paths.keys_path, requested_backend, allow_insecure, wrap_options);
-    defer freeWrappedDekRecord(allocator, wrapped);
+    const init_state = try initOrLoadKeys(allocator, paths.keys_path, requested_backend, allow_insecure, wrap_options);
+    defer init_state.deinit(allocator);
+    const wrapped = init_state.wrapped;
 
-    const dek = try unwrapDek(allocator, wrapped);
+    const dek = if (init_state.dek) |created_dek|
+        try allocator.dupe(u8, created_dek)
+    else
+        try unwrapDek(allocator, wrapped);
     defer allocator.free(dek);
 
     const db = try openDb(paths.db_path);
@@ -1069,8 +1073,18 @@ fn chooseInitBackend(allocator: std.mem.Allocator, requested_backend: ?[]const u
     return pathing.chooseInitBackend(allocator, requested_backend, allow_insecure);
 }
 
-fn initOrLoadKeys(allocator: std.mem.Allocator, keys_path: []const u8, requested_backend: ?[]const u8, allow_insecure: bool, options: WrapBackendOptions) !WrappedDekRecord {
-    if (try fileExists(keys_path)) return loadWrappedDek(allocator, keys_path);
+const InitKeyState = struct {
+    wrapped: WrappedDekRecord,
+    dek: ?[]u8 = null,
+
+    fn deinit(self: InitKeyState, allocator: std.mem.Allocator) void {
+        freeWrappedDekRecord(allocator, self.wrapped);
+        if (self.dek) |dek| freeSecret(allocator, dek);
+    }
+};
+
+fn initOrLoadKeys(allocator: std.mem.Allocator, keys_path: []const u8, requested_backend: ?[]const u8, allow_insecure: bool, options: WrapBackendOptions) !InitKeyState {
+    if (try fileExists(keys_path)) return .{ .wrapped = try loadWrappedDek(allocator, keys_path) };
 
     const backend = if (options.secure_enclave) blk: {
         if (!secureEnclaveAvailable(allocator)) return error.WrapBackendUnavailable;
@@ -1085,7 +1099,10 @@ fn initOrLoadKeys(allocator: std.mem.Allocator, keys_path: []const u8, requested
     const record = try wrapDekForBackend(allocator, backend, 1, wrap_secret.secret, &dek, wrap_secret);
     errdefer freeWrappedDekRecord(allocator, record);
     try saveWrappedDek(keys_path, record);
-    return record;
+    return .{
+        .wrapped = record,
+        .dek = try allocator.dupe(u8, &dek),
+    };
 }
 
 const WrapSecret = struct {
@@ -4182,6 +4199,27 @@ test "explicit secure enclave wrap never falls back to plain platform store" {
     if (builtin.os.tag == .macos or envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return;
 
     try std.testing.expectError(error.WrapBackendUnavailable, createMacOsSecureEnclaveSecret(std.testing.allocator, 7, true));
+}
+
+test "init keeps freshly created secure enclave secret in process" {
+    if (!envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return;
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const keys_path = try std.fs.path.join(allocator, &.{ base, "keys.json" });
+    defer allocator.free(keys_path);
+
+    const state = try initOrLoadKeys(allocator, keys_path, "macos-secure-enclave", false, .{ .secure_enclave = true });
+    defer state.deinit(allocator);
+
+    try std.testing.expectEqualStrings("macos-secure-enclave", state.wrapped.backend);
+    try std.testing.expect(state.dek != null);
+    try std.testing.expect(state.wrapped.secret_ref != null);
+    try std.testing.expect(state.wrapped.secure_enclave_ephemeral_pub_b64 != null);
 }
 
 test "secure enclave wraps and unwraps via synthetic provider" {

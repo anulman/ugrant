@@ -512,7 +512,7 @@ test "platform secure store is always available on macos" {
     if (builtin.os.tag != .macos) return;
 
     try std.testing.expect(backendAvailable(std.testing.allocator, "platform-secure-store"));
-    try std.testing.expectEqualStrings("macos-secure-enclave", try chooseInitBackend(std.testing.allocator, null, false));
+    try std.testing.expectEqualStrings("platform-secure-store", try chooseInitBackend(std.testing.allocator, null, false));
 }
 
 test "platform secure store availability rules cover macos and windows without host gating" {
@@ -531,7 +531,7 @@ test "platform secure store backend resolution keeps keychain on macos and windo
     try std.testing.expectError(error.WrapBackendUnavailable, resolvePlatformSecureStoreBackendForOs(.macos, false, false));
 }
 
-test "default backend selection prefers strongest available backend" {
+test "default backend selection prefers secure enclave on macos when available" {
     try std.testing.expectEqualStrings("tpm2", try resolveBackendChoice(null, false, true, true, true));
     if (builtin.os.tag == .macos) {
         try std.testing.expectEqualStrings("macos-secure-enclave", try resolveBackendChoice(null, false, false, true, true));
