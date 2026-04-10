@@ -105,17 +105,27 @@ When `ugrant` resolves the requested backend
 Then on Linux it prefers TPM2 when TPM2 is available
 And otherwise on Linux it falls back to Secret Service via `secret-tool`
 And on macOS it uses the user's Keychain via a generic-password item in the default login keychain by default
-And macOS Secure Enclave is not selected by `platform-secure-store` alone
-And macOS Secure Enclave requires explicit `--secure-enclave`
+And macOS Secure Enclave is the preferred default for `ugrant init` when it is available
+And plain `--backend platform-secure-store` still means login Keychain rather than Secure Enclave on macOS
 And on other operating systems it uses that platform's secure store implementation
 And the persisted backend may be the concrete backend that was actually used
 And macOS Secure Enclave still persists the public backend `platform-secure-store` plus enclave-specific metadata
 
-### Scenario: Secure Enclave is an explicit macOS opt-in
+### Scenario: Secure Enclave is the default macOS init backend
+Given I am on macOS
+When I run `ugrant init`
+Then `ugrant` prefers Secure Enclave when it is available
+And it uses a Secure Enclave-backed non-exportable key instead of a plain Keychain generic-password wrap secret
+And `backend` reports `macos-secure-enclave`
+And `backend_provider` reports `macOS Secure Enclave`
+And `user_presence_required` reports `yes`
+And no silent fallback occurs if Secure Enclave setup fails
+
+### Scenario: Secure Enclave can still be requested explicitly on macOS
 Given I am on macOS
 When I run `ugrant init --secure-enclave`
-Then `ugrant` still persists backend `platform-secure-store`
-And it uses a Secure Enclave-backed non-exportable key instead of a plain Keychain generic-password wrap secret
+Then `ugrant` uses a Secure Enclave-backed non-exportable key instead of a plain Keychain generic-password wrap secret
+And `backend` reports `macos-secure-enclave`
 And `backend_provider` reports `macOS Secure Enclave`
 And no silent fallback occurs if Secure Enclave setup fails
 

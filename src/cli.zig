@@ -32,7 +32,7 @@ pub const usage_text =
     \\  --passphrase-env <NAME>    Rewrap to passphrase backend using env var contents
     \\  --passphrase-file <PATH>   Rewrap to passphrase backend using file contents
     \\  --allow-insecure-keyfile   Rewrap to insecure-keyfile backend (explicit opt-in)
-    \\  --secure-enclave           On macOS, use Secure Enclave under platform-secure-store
+    \\  --secure-enclave           On macOS, use Secure Enclave
     \\  --require-user-presence    Only with --secure-enclave, require local user presence
     \\                            platform-secure-store resolves to the strongest local platform store
     \\                            on Linux: TPM2 first, otherwise Secret Service (secret-tool)

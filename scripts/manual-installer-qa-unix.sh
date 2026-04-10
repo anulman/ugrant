@@ -61,7 +61,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
 - On macOS, after `ugrant rekey --backend platform-secure-store`, did `status` / `doctor` report `backend: platform-secure-store` and `backend_provider: macOS Keychain`?
 - On macOS, did Keychain Access or `security find-generic-password -s dev.ugrant.platform-secure-store ~/Library/Keychains/login.keychain-db` show a login-keychain generic-password item with account `dek:<key_version>`?
 - On macOS, was the move into Keychain explicit, meaning nothing migrated before you ran `ugrant rekey --backend platform-secure-store`?
-- On macOS, manually run `ugrant rekey --secure-enclave`. Did `status` / `doctor` still report `backend: platform-secure-store`, while switching `backend_provider` to `macOS Secure Enclave`?
+- On macOS, manually run `ugrant rekey --secure-enclave`. Did `status` / `doctor` report `backend: macos-secure-enclave` and `backend_provider: macOS Secure Enclave`?
 - If you also test `ugrant rekey --secure-enclave --require-user-presence`, did `status` / `doctor` report `user_presence_required: yes`, and did you record both an approved prompt and a cancelled prompt? A cancelled prompt should now appear as its own explicit Secure Enclave doctor failure.
 - After Secure Enclave testing, did `ugrant rekey --backend platform-secure-store` return the install to plain `backend_provider: macOS Keychain`?
 - Before any broader rollout, record at least one Apple Silicon pass for the Keychain -> Secure Enclave -> Keychain round-trip. Additional macOS hardware/version coverage is still recommended before calling it broadly ready.

@@ -64,6 +64,11 @@ jobs:
           if (-not (Get-Command minisign -ErrorAction SilentlyContinue)) {
             choco install minisign -y
           }
+          $minisign = Get-Command minisign -ErrorAction SilentlyContinue
+          if (-not $minisign) {
+            throw 'minisign install succeeded but minisign is still not on PATH'
+          }
+          "MINISIGN_EXE=$($minisign.Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run tests
         run: zig build test
@@ -160,6 +165,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          if (-not $env:MINISIGN_EXE) {
+            throw 'MINISIGN_EXE is not set'
+          }
           Get-ChildItem dist -Filter *.zip | ForEach-Object {
             $archive = $_.FullName
             $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
@@ -167,10 +175,10 @@ jobs:
             $keyPath = Join-Path $env:RUNNER_TEMP 'minisign.key'
             if ($env:MINISIGN_SECRET_KEY_B64) {
               [System.IO.File]::WriteAllBytes($keyPath, [System.Convert]::FromBase64String($env:MINISIGN_SECRET_KEY_B64))
-              "" | minisign -S -s $keyPath -m $archive -x "$archive.minisig"
+              "" | & $env:MINISIGN_EXE -S -s $keyPath -m $archive -x "$archive.minisig"
             } elseif ($env:MINISIGN_SECRET_KEY) {
               Set-Content -Path $keyPath -Value $env:MINISIGN_SECRET_KEY -NoNewline
-              "" | minisign -S -s $keyPath -m $archive -x "$archive.minisig"
+              "" | & $env:MINISIGN_EXE -S -s $keyPath -m $archive -x "$archive.minisig"
             }
           }
 
