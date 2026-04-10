@@ -2165,6 +2165,7 @@ fn writeMacOsSecureEnclaveFailure(err: *std.Io.Writer, command_name: []const u8,
     if (failure.message) |message| {
         try err.print("ugrant {s}: helper detail: {s}\n", .{ command_name, message });
     }
+    try err.print("ugrant {s}: set UGRANT_SE_DEBUG=1 for detailed helper logs\n", .{command_name});
 }
 
 fn runMacOsSecureEnclaveHelper(allocator: std.mem.Allocator, argv: []const []const u8) !std.process.Child.RunResult {
@@ -2172,7 +2173,18 @@ fn runMacOsSecureEnclaveHelper(allocator: std.mem.Allocator, argv: []const []con
     defer full_argv.deinit(allocator);
     try full_argv.appendSlice(allocator, &.{ "xcrun", "swift", "-" });
     try full_argv.appendSlice(allocator, argv);
-    return runChildWithInput(allocator, full_argv.items, macos_secure_enclave_helper_script, 64 * 1024);
+
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+    try env_map.put("UGRANT_SE_DEBUG", "1");
+
+    return std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = full_argv.items,
+        .env_map = &env_map,
+        .stdin = .{ .bytes = macos_secure_enclave_helper_script },
+        .max_output_bytes = 64 * 1024,
+    });
 }
 
 fn finishMacOsSecureEnclaveHelperResult(allocator: std.mem.Allocator, result: std.process.Child.RunResult) !MacOsSecureEnclaveHelperResult {
@@ -2239,6 +2251,7 @@ fn freeMacOsSecureEnclaveRefs(allocator: std.mem.Allocator, refs: []MacOsSecureE
 }
 
 fn createMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, key_version: u32, require_user_presence: bool) !MacOsSecureEnclaveHelperResult {
+    std.log.info("secure-enclave create start key_version={} require_user_presence={}", .{ key_version, require_user_presence });
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) {
         const tag = try formatMacOsSecureEnclaveApplicationTag(allocator, key_version);
         defer allocator.free(tag);
@@ -2278,7 +2291,14 @@ fn createMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, key_vers
     };
     defer allocator.free(helper_result.stdout);
     defer allocator.free(helper_result.stderr);
-    return finishMacOsSecureEnclaveHelperResult(allocator, helper_result);
+    std.log.info("secure-enclave create helper exited term={any} stdout_len={} stderr_len={}", .{ helper_result.term, helper_result.stdout.len, helper_result.stderr.len });
+    if (helper_result.stderr.len > 0) std.log.err("secure-enclave create helper stderr:\n{s}", .{helper_result.stderr});
+    const result = try finishMacOsSecureEnclaveHelperResult(allocator, helper_result);
+    switch (result) {
+        .success => std.log.info("secure-enclave create success key_version={}", .{key_version}),
+        .failure => |failure| std.log.err("secure-enclave create failure reason={s}", .{@tagName(failure.reason)}),
+    }
+    return result;
 }
 
 fn createMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, key_version: u32, require_user_presence: bool) !WrapSecret {
@@ -2321,6 +2341,7 @@ fn loadMacOsSecureEnclaveSecret(allocator: std.mem.Allocator, secret_ref: []cons
 }
 
 fn loadMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, secret_ref: []const u8, expected_key_version: u32, ephemeral_pub_b64: []const u8, require_user_presence: bool) !MacOsSecureEnclaveHelperResult {
+    std.log.info("secure-enclave load start key_version={} require_user_presence={} secret_ref={s}", .{ expected_key_version, require_user_presence, secret_ref });
     const parsed = try parseMacOsSecureEnclaveSecretRef(secret_ref);
     if (parsed.key_version != expected_key_version) return .{ .failure = .{ .reason = .key_missing, .message = try std.fmt.allocPrint(allocator, "Secure Enclave key version mismatch: expected {}, got {}", .{ expected_key_version, parsed.key_version }) } };
 
@@ -2343,7 +2364,14 @@ fn loadMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, secret_ref
     };
     defer allocator.free(helper_result.stdout);
     defer allocator.free(helper_result.stderr);
-    return finishMacOsSecureEnclaveHelperResult(allocator, helper_result);
+    std.log.info("secure-enclave load helper exited term={any} stdout_len={} stderr_len={}", .{ helper_result.term, helper_result.stdout.len, helper_result.stderr.len });
+    if (helper_result.stderr.len > 0) std.log.err("secure-enclave load helper stderr:\n{s}", .{helper_result.stderr});
+    const result = try finishMacOsSecureEnclaveHelperResult(allocator, helper_result);
+    switch (result) {
+        .success => std.log.info("secure-enclave load success key_version={}", .{expected_key_version}),
+        .failure => |failure| std.log.err("secure-enclave load failure reason={s}", .{@tagName(failure.reason)}),
+    }
+    return result;
 }
 
 fn unwrapMacOsSecureEnclaveDekForDoctor(allocator: std.mem.Allocator, record: WrappedDekRecord, out: *std.Io.Writer, err: *std.Io.Writer) ![]u8 {

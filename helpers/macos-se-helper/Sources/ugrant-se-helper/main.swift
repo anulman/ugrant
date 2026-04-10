@@ -3,6 +3,11 @@ import Foundation
 import LocalAuthentication
 import Security
 let wrapMaterialService = "dev.ugrant.secure-enclave.wrap-material"
+let debugLoggingEnabled = ProcessInfo.processInfo.environment["UGRANT_SE_DEBUG"] == "1"
+func debugLog(_ message: String) {
+    guard debugLoggingEnabled else { return }
+    FileHandle.standardError.write(Data(("[ugrant-se-helper] " + message + "\n").utf8))
+}
 let wrapMaterialVersion = 1
 let wrapMaterialInfo = Data("ugrant-secure-enclave-wrap-material".utf8)
 func emitError(reason: String, message: String) {
@@ -211,15 +216,19 @@ func findCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> S
     return nil
 }
 func loadCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil, retries: Int = 20, retryDelaySeconds: Double = 0.1) -> SecKey {
+    debugLog("loadCtkPrivateKey start label=\(label) expectedHash=\(expectedPublicKeyHash ?? "<none>") retries=\(retries) delay=\(retryDelaySeconds)")
     for attempt in 0...max(0, retries) {
+        debugLog("loadCtkPrivateKey attempt \(attempt + 1)/\(max(0, retries) + 1)")
         if let key = findCtkPrivateKey(label: label, expectedPublicKeyHash: expectedPublicKeyHash) {
+            debugLog("loadCtkPrivateKey success on attempt \(attempt + 1)")
             return key
         }
+        debugLog("loadCtkPrivateKey miss on attempt \(attempt + 1)")
         if attempt < retries {
             Thread.sleep(forTimeInterval: retryDelaySeconds)
         }
     }
-    fail("CTK key not found for label \(label)", reason: "key_missing")
+    fail("CTK key not found for label \(label) after \(max(0, retries) + 1) attempts", reason: "key_missing")
 }
 func loadWrapMaterial(tag: String) -> Data? {
     let query: [String: Any] = [
@@ -351,6 +360,7 @@ func emit(_ payload: [String: Any]) {
     }
 }
 func runScAuth(_ args: [String]) -> String {
+    debugLog("runScAuth starting: /usr/sbin/sc_auth \(args.joined(separator: " "))")
     let proc = Process()
     proc.executableURL = URL(fileURLWithPath: "/usr/sbin/sc_auth")
     proc.arguments = args
@@ -366,6 +376,7 @@ func runScAuth(_ args: [String]) -> String {
     proc.waitUntilExit()
     let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
     let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    debugLog("runScAuth finished status=\(proc.terminationStatus) stdout=\(stdout.isEmpty ? "<empty>" : stdout.replacingOccurrences(of: "\n", with: "\\n")) stderr=\(stderr.isEmpty ? "<empty>" : stderr.replacingOccurrences(of: "\n", with: "\\n"))")
     guard proc.terminationStatus == 0 else {
         fail("sc_auth failed: \(stderr.isEmpty ? stdout : stderr)")
     }
@@ -452,19 +463,29 @@ case "create-ctk-wrap":
     let label = args[2]
     let requireUserPresence = args[3] == "1" || args[3].lowercased() == "true"
     let protection = requireUserPresence ? "bio" : "none"
+    debugLog("create-ctk-wrap start label=\(label) requireUserPresence=\(requireUserPresence) protection=\(protection)")
     _ = runScAuth(["create-ctk-identity", "-l", label, "-k", "p-256", "-t", protection, "-N", "ugrant", "-O", "ugrant", "-U", "Secure Enclave", "-L", "Local", "-S", "Local", "-C", "US"])
+    debugLog("create-ctk-wrap identity created, listing identities")
     let identities = parseCtkIdentities(runScAuth(["list-ctk-identities"]))
+    debugLog("create-ctk-wrap identities count=\(identities.count)")
     guard let match = identities.first(where: { $0["label"] == label }), let publicKeyHash = match["public_key_hash"], !publicKeyHash.isEmpty else {
         fail("created CTK identity not found after sc_auth create")
     }
+    debugLog("create-ctk-wrap matched label=\(label) publicKeyHash=\(publicKeyHash)")
     let enclaveKey = loadCtkPrivateKey(label: label, expectedPublicKeyHash: publicKeyHash)
+    debugLog("create-ctk-wrap CTK private key loaded")
     let ephemeralPrivate = createEphemeralPrivateKey()
     let ephemeralPubB64 = publicKeyData(ephemeralPrivate).base64EncodedString()
+    debugLog("create-ctk-wrap ephemeral key generated pubB64Length=\(ephemeralPubB64.count)")
     let wrapSecret = randomData(32)
+    debugLog("create-ctk-wrap wrap secret generated length=\(wrapSecret.count)")
     let key = wrapKey(privateKey: ephemeralPrivate, publicKey: SecKeyCopyPublicKey(enclaveKey)!)
+    debugLog("create-ctk-wrap derived wrap key")
     var payload = sealWrapMaterial(secret: wrapSecret, key: key)
     payload["ephemeral_pub_b64"] = ephemeralPubB64
+    debugLog("create-ctk-wrap storing wrap material")
     storeWrapMaterial(tag: label, payload: payload)
+    debugLog("create-ctk-wrap success")
     emit([
         "secret_b64": wrapSecret.base64EncodedString(),
         "secret_ref": "macos-ctk-secure-enclave:label=\(label);hash=\(publicKeyHash)",
@@ -475,10 +496,14 @@ case "list-ctk":
     emit(["identities": parseCtkIdentities(runScAuth(["list-ctk-identities"]))])
 case "load-ctk":
     if args.count != 5 { fail("usage: load-ctk <label> <public-key-hash> <ephemeral-pub-b64>") }
+    debugLog("load-ctk start label=\(args[2]) publicKeyHash=\(args[3]) ephemeralPubB64Length=\(args[4].count)")
     guard let ephemeralPub = Data(base64Encoded: args[4]) else { fail("invalid ephemeral public key base64") }
+    debugLog("load-ctk decoded ephemeral public key bytes=\(ephemeralPub.count)")
     let enclaveKey = loadCtkPrivateKey(label: args[2], expectedPublicKeyHash: args[3])
+    debugLog("load-ctk CTK private key loaded")
     let secret: Data
     if let stored = loadWrapMaterial(tag: args[2]) {
+        debugLog("load-ctk found stored wrap material bytes=\(stored.count)")
         let raw: Any
         do {
             raw = try JSONSerialization.jsonObject(with: stored, options: [])
@@ -491,9 +516,13 @@ case "load-ctk":
         if let storedEphemeral = payload["ephemeral_pub_b64"] as? String, storedEphemeral != args[4] {
             fail("stored wrap material does not match wrapped-key metadata")
         }
+        debugLog("load-ctk deriving wrap key from stored material")
         secret = openWrapMaterial(payload: payload, key: wrapKey(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub)))
+        debugLog("load-ctk unwrapped stored material successfully")
     } else {
+        debugLog("load-ctk no stored wrap material, using raw shared secret path")
         secret = sharedSecret(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))
+        debugLog("load-ctk derived shared secret successfully")
     }
     emit([
         "secret_b64": secret.base64EncodedString(),
