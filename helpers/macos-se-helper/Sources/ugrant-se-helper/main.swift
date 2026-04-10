@@ -183,35 +183,53 @@ func publicKeyHashHex(_ key: SecKey) -> String {
     return digest.map { String(format: "%02x", $0) }.joined()
 }
 func findCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> SecKey? {
-    let query: [String: Any] = [
-        kSecClass as String: kSecClassKey,
-        kSecAttrLabel as String: label,
-        kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
-        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-        kSecReturnRef as String: true,
-        kSecMatchLimit as String: kSecMatchLimitAll,
+    let candidateQueries: [[String: Any]] = [
+        [
+            kSecClass as String: kSecClassKey,
+            kSecAttrLabel as String: label,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecReturnRef as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+        ],
+        [
+            kSecClass as String: kSecClassKey,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecReturnRef as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+        ],
     ]
-    var item: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &item)
-    if status == errSecItemNotFound { return nil }
-    guard status == errSecSuccess else {
-        fail("SecItemCopyMatching CTK key failed: \(status)", reason: reasonForStatus(status))
-    }
 
-    let keys: [SecKey]
-    if let many = item as? [SecKey] {
-        keys = many
-    } else if let one = item as! SecKey? {
-        keys = [one]
-    } else {
-        fail("CTK key lookup returned unexpected result", reason: "unavailable")
-    }
-
-    for key in keys {
-        if let expectedPublicKeyHash, publicKeyHashHex(SecKeyCopyPublicKey(key)!) != expectedPublicKeyHash {
-            continue
+    for (queryIndex, query) in candidateQueries.enumerated() {
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        debugLog("findCtkPrivateKey query#\(queryIndex + 1) status=\(status) label=\(label) expectedHash=\(expectedPublicKeyHash ?? "<none>")")
+        if status == errSecItemNotFound { continue }
+        guard status == errSecSuccess else {
+            fail("SecItemCopyMatching CTK key failed: \(status)", reason: reasonForStatus(status))
         }
-        return key
+
+        let keys: [SecKey]
+        if let many = item as? [SecKey] {
+            keys = many
+        } else if let one = item as! SecKey? {
+            keys = [one]
+        } else {
+            fail("CTK key lookup returned unexpected result", reason: "unavailable")
+        }
+
+        debugLog("findCtkPrivateKey query#\(queryIndex + 1) candidateCount=\(keys.count)")
+        for key in keys {
+            guard let publicKey = SecKeyCopyPublicKey(key) else { continue }
+            let hash = publicKeyHashHex(publicKey)
+            debugLog("findCtkPrivateKey candidate hash=\(hash)")
+            if let expectedPublicKeyHash, !hash.caseInsensitiveCompare(expectedPublicKeyHash).equals(.orderedSame) {
+                continue
+            }
+            debugLog("findCtkPrivateKey matched candidate hash=\(hash) via query#\(queryIndex + 1)")
+            return key
+        }
     }
     return nil
 }

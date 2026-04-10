@@ -1532,35 +1532,53 @@ const macos_secure_enclave_helper_script =
     "    return digest.map { String(format: \"%02x\", $0) }.joined()\n" ++
     "}\n" ++
     "func findCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> SecKey? {\n" ++
-    "    let query: [String: Any] = [\n" ++
-    "        kSecClass as String: kSecClassKey,\n" ++
-    "        kSecAttrLabel as String: label,\n" ++
-    "        kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,\n" ++
-    "        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
-    "        kSecReturnRef as String: true,\n" ++
-    "        kSecMatchLimit as String: kSecMatchLimitAll,\n" ++
+    "    let candidateQueries: [[String: Any]] = [\n" ++
+    "        [\n" ++
+    "            kSecClass as String: kSecClassKey,\n" ++
+    "            kSecAttrLabel as String: label,\n" ++
+    "            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,\n" ++
+    "            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
+    "            kSecReturnRef as String: true,\n" ++
+    "            kSecMatchLimit as String: kSecMatchLimitAll,\n" ++
+    "        ],\n" ++
+    "        [\n" ++
+    "            kSecClass as String: kSecClassKey,\n" ++
+    "            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,\n" ++
+    "            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
+    "            kSecReturnRef as String: true,\n" ++
+    "            kSecMatchLimit as String: kSecMatchLimitAll,\n" ++
+    "        ],\n" ++
     "    ]\n" ++
-    "    var item: CFTypeRef?\n" ++
-    "    let status = SecItemCopyMatching(query as CFDictionary, &item)\n" ++
-    "    if status == errSecItemNotFound { return nil }\n" ++
-    "    guard status == errSecSuccess else {\n" ++
-    "        fail(\"SecItemCopyMatching CTK key failed: \\(status)\", reason: reasonForStatus(status))\n" ++
-    "    }\n" ++
     "\n" ++
-    "    let keys: [SecKey]\n" ++
-    "    if let many = item as? [SecKey] {\n" ++
-    "        keys = many\n" ++
-    "    } else if let one = item as! SecKey? {\n" ++
-    "        keys = [one]\n" ++
-    "    } else {\n" ++
-    "        fail(\"CTK key lookup returned unexpected result\", reason: \"unavailable\")\n" ++
-    "    }\n" ++
-    "\n" ++
-    "    for key in keys {\n" ++
-    "        if let expectedPublicKeyHash, publicKeyHashHex(SecKeyCopyPublicKey(key)!) != expectedPublicKeyHash {\n" ++
-    "            continue\n" ++
+    "    for (queryIndex, query) in candidateQueries.enumerated() {\n" ++
+    "        var item: CFTypeRef?\n" ++
+    "        let status = SecItemCopyMatching(query as CFDictionary, &item)\n" ++
+    "        debugLog(\"findCtkPrivateKey query#\\(queryIndex + 1) status=\\(status) label=\\(label) expectedHash=\\(expectedPublicKeyHash ?? \"<none>\")\")\n" ++
+    "        if status == errSecItemNotFound { continue }\n" ++
+    "        guard status == errSecSuccess else {\n" ++
+    "            fail(\"SecItemCopyMatching CTK key failed: \\(status)\", reason: reasonForStatus(status))\n" ++
     "        }\n" ++
-    "        return key\n" ++
+    "\n" ++
+    "        let keys: [SecKey]\n" ++
+    "        if let many = item as? [SecKey] {\n" ++
+    "            keys = many\n" ++
+    "        } else if let one = item as! SecKey? {\n" ++
+    "            keys = [one]\n" ++
+    "        } else {\n" ++
+    "            fail(\"CTK key lookup returned unexpected result\", reason: \"unavailable\")\n" ++
+    "        }\n" ++
+    "\n" ++
+    "        debugLog(\"findCtkPrivateKey query#\\(queryIndex + 1) candidateCount=\\(keys.count)\")\n" ++
+    "        for key in keys {\n" ++
+    "            guard let publicKey = SecKeyCopyPublicKey(key) else { continue }\n" ++
+    "            let hash = publicKeyHashHex(publicKey)\n" ++
+    "            debugLog(\"findCtkPrivateKey candidate hash=\\(hash)\")\n" ++
+    "            if let expectedPublicKeyHash, !hash.caseInsensitiveCompare(expectedPublicKeyHash).equals(.orderedSame) {\n" ++
+    "                continue\n" ++
+    "            }\n" ++
+    "            debugLog(\"findCtkPrivateKey matched candidate hash=\\(hash) via query#\\(queryIndex + 1)\")\n" ++
+    "            return key\n" ++
+    "        }\n" ++
     "    }\n" ++
     "    return nil\n" ++
     "}\n" ++
@@ -2145,7 +2163,13 @@ fn parseMacOsSecureEnclaveFailureReason(reason_text: []const u8) ?MacOsSecureEnc
 }
 
 fn parseMacOsSecureEnclaveFailureFromJson(allocator: std.mem.Allocator, stderr: []const u8) ?MacOsSecureEnclaveFailure {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, stderr, .{}) catch return null;
+    var candidate = std.mem.trim(u8, stderr, "\r\n\t ");
+    if (candidate.len == 0) return null;
+    if (std.mem.lastIndexOfScalar(u8, candidate, '\n')) |idx| {
+        const tail = std.mem.trim(u8, candidate[idx + 1 ..], "\r\n\t ");
+        if (tail.len > 0) candidate = tail;
+    }
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, candidate, .{}) catch return null;
     defer parsed.deinit();
     const obj = parsed.value.object;
     const reason = obj.get("reason") orelse return null;
