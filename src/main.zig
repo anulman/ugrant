@@ -1696,6 +1696,11 @@ const macos_secure_enclave_helper_script =
     "        fail(\"AES-GCM open failed: \\(error)\")\n" ++
     "    }\n" ++
     "}\n" ++
+    "let debugLoggingEnabled = ProcessInfo.processInfo.environment[\"UGRANT_SE_DEBUG\"] == \"1\"\n" ++
+    "func debugLog(_ message: String) {\n" ++
+    "    guard debugLoggingEnabled else { return }\n" ++
+    "    FileHandle.standardError.write(Data((\"[ugrant-se-helper] \" + message + \"\\n\").utf8))\n" ++
+    "}\n" ++
     "func emit(_ payload: [String: Any]) {\n" ++
     "    do {\n" ++
     "        let data = try JSONSerialization.data(withJSONObject: payload, options: [])\n" ++
