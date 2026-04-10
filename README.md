@@ -103,7 +103,7 @@ Both installers prefer minisign verification when `minisign` is available. If no
 - When Secure Enclave is active, `ugrant status` and `ugrant doctor` should report `backend: macos-secure-enclave` and `backend_provider: macOS Secure Enclave`.
 - The wrapped DEK is stored as a login-keychain generic-password item with service `dev.ugrant.platform-secure-store` and account `dek:<key_version>`.
 - Existing passphrase or insecure installs are not silently migrated into Keychain. Move them explicitly with `ugrant rekey --backend platform-secure-store`.
-- Secure Enclave mode can still be requested explicitly with `ugrant init --secure-enclave` or `ugrant rekey --secure-enclave`, and `--require-user-presence` still adds local approval on unwrap.
+- Secure Enclave mode can still be requested explicitly with `ugrant init --secure-enclave` or `ugrant rekey --secure-enclave`. `ugrant init --secure-enclave` now defaults to requiring user presence, and `--require-user-presence` remains available for explicit rekey flows.
 - Plain login Keychain stays the fallback when Secure Enclave is unavailable, and it remains the explicit non-Enclave macOS backend via `platform-secure-store`.
 - Release builds now ship a single `ugrant` binary. The old `ugrant-se-helper` sidecar is no longer packaged or installed.
 - The current macOS bridge path is inline from `ugrant` itself, with `sc_auth` handling CTK identity lifecycle. `ugrant init` now keeps the freshly created Secure Enclave wrap secret in-process for first-run bootstrap instead of immediately reloading CTK state before the command finishes.

@@ -490,8 +490,8 @@ case "create-ctk-wrap":
         fail("created CTK identity not found after sc_auth create")
     }
     debugLog("create-ctk-wrap matched label=\(label) publicKeyHash=\(publicKeyHash)")
-    let enclaveKey = loadCtkPrivateKey(label: label, expectedPublicKeyHash: publicKeyHash)
-    debugLog("create-ctk-wrap CTK private key loaded")
+    let enclaveKey = loadCtkPrivateKey(label: label)
+    debugLog("create-ctk-wrap CTK private key loaded (label-only bootstrap path)")
     let ephemeralPrivate = createEphemeralPrivateKey()
     let ephemeralPubB64 = publicKeyData(ephemeralPrivate).base64EncodedString()
     debugLog("create-ctk-wrap ephemeral key generated pubB64Length=\(ephemeralPubB64.count)")

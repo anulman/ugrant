@@ -268,6 +268,7 @@ fn cmdInit(allocator: std.mem.Allocator, args: []const []const u8, out: *std.Io.
         std.process.exit(2);
     }
     if (wrap_options.secure_enclave) {
+        wrap_options.require_user_presence = true;
         if (requested_backend) |backend| {
             if (!std.mem.eql(u8, backend, "macos-secure-enclave")) {
                 try err.writeAll("ugrant init: --secure-enclave only works with --backend macos-secure-enclave\n");
@@ -1838,8 +1839,8 @@ const macos_secure_enclave_helper_script =
     "        fail(\"created CTK identity not found after sc_auth create\")\n" ++
     "    }\n" ++
     "    debugLog(\"create-ctk-wrap matched label=\\(label) publicKeyHash=\\(publicKeyHash)\")\n" ++
-    "    let enclaveKey = loadCtkPrivateKey(label: label, expectedPublicKeyHash: publicKeyHash)\n" ++
-    "    debugLog(\"create-ctk-wrap CTK private key loaded\")\n" ++
+    "    let enclaveKey = loadCtkPrivateKey(label: label)\n" ++
+    "    debugLog(\"create-ctk-wrap CTK private key loaded (label-only bootstrap path)\")\n" ++
     "    let ephemeralPrivate = createEphemeralPrivateKey()\n" ++
     "    let ephemeralPubB64 = publicKeyData(ephemeralPrivate).base64EncodedString()\n" ++
     "    debugLog(\"create-ctk-wrap ephemeral key generated pubB64Length=\\(ephemeralPubB64.count)\")\n" ++
