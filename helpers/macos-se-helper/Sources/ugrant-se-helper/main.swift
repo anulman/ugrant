@@ -317,20 +317,12 @@ func sharedSecret(privateKey: SecKey, publicKey: SecKey) -> Data {
     return data
 }
 func wrapKey(privateKey: SecKey, publicKey: SecKey) -> SymmetricKey {
-    let algorithm = SecKeyAlgorithm.ecdhKeyExchangeStandardX963SHA256
-    guard SecKeyIsAlgorithmSupported(privateKey, .keyExchange, algorithm) else {
-        fail("ECDH X9.63 SHA-256 key exchange is not supported for this key", reason: "unavailable")
-    }
-    var error: Unmanaged<CFError>?
-    let params: [SecKeyKeyExchangeParameter: Any] = [
-        SecKeyKeyExchangeParameter.requestedSize: 32,
-        SecKeyKeyExchangeParameter.sharedInfo: wrapMaterialInfo,
-    ]
-    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params as CFDictionary, &error) as Data? else {
-        let failure = secError(error)
-        fail("wrap key derivation failed: \(failure.message)", reason: failure.reason)
-    }
-    return SymmetricKey(data: data)
+    let secret = sharedSecret(privateKey: privateKey, publicKey: publicKey)
+    var material = Data()
+    material.append(secret)
+    material.append(wrapMaterialInfo)
+    let digest = SHA256.hash(data: material)
+    return SymmetricKey(data: Data(digest))
 }
 func sealWrapMaterial(secret: Data, key: SymmetricKey) -> [String: Any] {
     do {
