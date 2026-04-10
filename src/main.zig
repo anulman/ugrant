@@ -1086,6 +1086,8 @@ const InitKeyState = struct {
 fn initOrLoadKeys(allocator: std.mem.Allocator, keys_path: []const u8, requested_backend: ?[]const u8, allow_insecure: bool, options: WrapBackendOptions) !InitKeyState {
     if (try fileExists(keys_path)) return .{ .wrapped = try loadWrappedDek(allocator, keys_path) };
 
+    // First-time init on macOS Secure Enclave is expected to create the CTK identity
+    // and wrap material if they do not already exist.
     const backend = if (options.secure_enclave) blk: {
         if (!secureEnclaveAvailable(allocator)) return error.WrapBackendUnavailable;
         break :blk "macos-secure-enclave";
@@ -1804,19 +1806,29 @@ const macos_secure_enclave_helper_script =
     "    let label = args[2]\n" ++
     "    let requireUserPresence = args[3] == \"1\" || args[3].lowercased() == \"true\"\n" ++
     "    let protection = requireUserPresence ? \"bio\" : \"none\"\n" ++
+    "    debugLog(\"create-ctk-wrap start label=\\(label) requireUserPresence=\\(requireUserPresence) protection=\\(protection)\")\n" ++
     "    _ = runScAuth([\"create-ctk-identity\", \"-l\", label, \"-k\", \"p-256\", \"-t\", protection, \"-N\", \"ugrant\", \"-O\", \"ugrant\", \"-U\", \"Secure Enclave\", \"-L\", \"Local\", \"-S\", \"Local\", \"-C\", \"US\"])\n" ++
+    "    debugLog(\"create-ctk-wrap identity created, listing identities\")\n" ++
     "    let identities = parseCtkIdentities(runScAuth([\"list-ctk-identities\"]))\n" ++
+    "    debugLog(\"create-ctk-wrap identities count=\\(identities.count)\")\n" ++
     "    guard let match = identities.first(where: { $0[\"label\"] == label }), let publicKeyHash = match[\"public_key_hash\"], !publicKeyHash.isEmpty else {\n" ++
     "        fail(\"created CTK identity not found after sc_auth create\")\n" ++
     "    }\n" ++
+    "    debugLog(\"create-ctk-wrap matched label=\\(label) publicKeyHash=\\(publicKeyHash)\")\n" ++
     "    let enclaveKey = loadCtkPrivateKey(label: label, expectedPublicKeyHash: publicKeyHash)\n" ++
+    "    debugLog(\"create-ctk-wrap CTK private key loaded\")\n" ++
     "    let ephemeralPrivate = createEphemeralPrivateKey()\n" ++
     "    let ephemeralPubB64 = publicKeyData(ephemeralPrivate).base64EncodedString()\n" ++
+    "    debugLog(\"create-ctk-wrap ephemeral key generated pubB64Length=\\(ephemeralPubB64.count)\")\n" ++
     "    let wrapSecret = randomData(32)\n" ++
+    "    debugLog(\"create-ctk-wrap wrap secret generated length=\\(wrapSecret.count)\")\n" ++
     "    let key = wrapKey(privateKey: ephemeralPrivate, publicKey: SecKeyCopyPublicKey(enclaveKey)!)\n" ++
+    "    debugLog(\"create-ctk-wrap derived wrap key\")\n" ++
     "    var payload = sealWrapMaterial(secret: wrapSecret, key: key)\n" ++
     "    payload[\"ephemeral_pub_b64\"] = ephemeralPubB64\n" ++
+    "    debugLog(\"create-ctk-wrap storing wrap material\")\n" ++
     "    storeWrapMaterial(tag: label, payload: payload)\n" ++
+    "    debugLog(\"create-ctk-wrap success\")\n" ++
     "    emit([\n" ++
     "        \"secret_b64\": wrapSecret.base64EncodedString(),\n" ++
     "        \"secret_ref\": \"macos-ctk-secure-enclave:label=\\(label);hash=\\(publicKeyHash)\",\n" ++
@@ -1827,10 +1839,14 @@ const macos_secure_enclave_helper_script =
     "    emit([\"identities\": parseCtkIdentities(runScAuth([\"list-ctk-identities\"]))])\n" ++
     "case \"load-ctk\":\n" ++
     "    if args.count != 5 { fail(\"usage: load-ctk <label> <public-key-hash> <ephemeral-pub-b64>\") }\n" ++
+    "    debugLog(\"load-ctk start label=\\(args[2]) publicKeyHash=\\(args[3]) ephemeralPubB64Length=\\(args[4].count)\")\n" ++
     "    guard let ephemeralPub = Data(base64Encoded: args[4]) else { fail(\"invalid ephemeral public key base64\") }\n" ++
+    "    debugLog(\"load-ctk decoded ephemeral public key bytes=\\(ephemeralPub.count)\")\n" ++
     "    let enclaveKey = loadCtkPrivateKey(label: args[2], expectedPublicKeyHash: args[3])\n" ++
+    "    debugLog(\"load-ctk CTK private key loaded\")\n" ++
     "    let secret: Data\n" ++
     "    if let stored = loadWrapMaterial(tag: args[2]) {\n" ++
+    "        debugLog(\"load-ctk found stored wrap material bytes=\\(stored.count)\")\n" ++
     "        let raw: Any\n" ++
     "        do {\n" ++
     "            raw = try JSONSerialization.jsonObject(with: stored, options: [])\n" ++
@@ -1843,9 +1859,13 @@ const macos_secure_enclave_helper_script =
     "        if let storedEphemeral = payload[\"ephemeral_pub_b64\"] as? String, storedEphemeral != args[4] {\n" ++
     "            fail(\"stored wrap material does not match wrapped-key metadata\")\n" ++
     "        }\n" ++
+    "        debugLog(\"load-ctk deriving wrap key from stored material\")\n" ++
     "        secret = openWrapMaterial(payload: payload, key: wrapKey(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub)))\n" ++
+    "        debugLog(\"load-ctk unwrapped stored material successfully\")\n" ++
     "    } else {\n" ++
+    "        debugLog(\"load-ctk no stored wrap material, using raw shared secret path\")\n" ++
     "        secret = sharedSecret(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))\n" ++
+    "        debugLog(\"load-ctk derived shared secret successfully\")\n" ++
     "    }\n" ++
     "    emit([\n" ++
     "        \"secret_b64\": secret.base64EncodedString(),\n" ++
@@ -2246,6 +2266,7 @@ fn freeMacOsSecureEnclaveRefs(allocator: std.mem.Allocator, refs: []MacOsSecureE
 
 fn createMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, key_version: u32, require_user_presence: bool) !MacOsSecureEnclaveHelperResult {
     std.log.info("secure-enclave create start key_version={} require_user_presence={}", .{ key_version, require_user_presence });
+    std.log.info("secure-enclave create context test_mode={} os={s}", .{ envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE"), @tagName(builtin.os.tag) });
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) {
         const tag = try formatMacOsSecureEnclaveApplicationTag(allocator, key_version);
         defer allocator.free(tag);
@@ -2280,6 +2301,7 @@ fn createMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, key_vers
 
     const label = try formatMacOsSecureEnclaveApplicationTag(allocator, key_version);
     defer allocator.free(label);
+    std.log.info("secure-enclave create invoking helper label={s}", .{label});
     const helper_result = runMacOsSecureEnclaveHelper(allocator, &.{ "create-ctk-wrap", label, if (require_user_presence) "1" else "0" }) catch |helper_err| {
         return .{ .failure = .{ .reason = .unavailable, .message = try std.fmt.allocPrint(allocator, "failed to launch macOS Secure Enclave helper: {any}", .{helper_err}) } };
     };
@@ -2289,8 +2311,13 @@ fn createMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, key_vers
     if (helper_result.stderr.len > 0) std.log.err("secure-enclave create helper stderr:\n{s}", .{helper_result.stderr});
     const result = try finishMacOsSecureEnclaveHelperResult(allocator, helper_result);
     switch (result) {
-        .success => std.log.info("secure-enclave create success key_version={}", .{key_version}),
-        .failure => |failure| std.log.err("secure-enclave create failure reason={s}", .{@tagName(failure.reason)}),
+        .success => |wrap| {
+            std.log.info("secure-enclave create success key_version={} secret_ref={s} eph_pub_len={} require_user_presence={}", .{ key_version, wrap.secret_ref orelse "", if (wrap.secure_enclave_ephemeral_pub_b64) |v| v.len else 0, wrap.require_user_presence });
+        },
+        .failure => |failure| {
+            std.log.err("secure-enclave create failure reason={s}", .{@tagName(failure.reason)});
+            if (failure.message) |message| std.log.err("secure-enclave create failure detail={s}", .{message});
+        },
     }
     return result;
 }
