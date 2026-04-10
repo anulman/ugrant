@@ -1859,7 +1859,6 @@ const macos_secure_enclave_helper_script =
     "    fail(\"unknown mode: \\(args[1])\")\n" ++
     "}";
 
-
 fn secureEnclaveAvailable(allocator: std.mem.Allocator) bool {
     if (envTruthy("UGRANT_TEST_SECURE_ENCLAVE_AVAILABLE")) return true;
     if (builtin.os.tag != .macos) return false;
@@ -2399,9 +2398,24 @@ fn parseMacOsKeychainSecretRef(secret_ref: []const u8) !MacOsKeychainRef {
     return .{ .service = service_name, .account = account, .key_version = key_version };
 }
 
-fn loadMacOsKeychainSecret(allocator: std.mem.Allocator, secret_ref: []const u8, expected_key_version: u32) !WrapSecret {
+fn validateMacOsKeychainRecord(record: WrappedDekRecord) !MacOsKeychainRef {
+    const secret_ref = record.secret_ref orelse return error.InvalidWrappedDek;
     const parsed = try parseMacOsKeychainSecretRef(secret_ref);
-    if (parsed.key_version != expected_key_version) return error.InvalidWrappedDek;
+    if (parsed.key_version != record.key_version) return error.InvalidWrappedDek;
+    return parsed;
+}
+
+fn loadMacOsKeychainSecret(allocator: std.mem.Allocator, secret_ref: []const u8, expected_key_version: u32) !WrapSecret {
+    const parsed = try validateMacOsKeychainRecord(.{
+        .version = 0,
+        .backend = "platform-secure-store",
+        .key_version = expected_key_version,
+        .salt_b64 = "",
+        .nonce_b64 = "",
+        .ciphertext_b64 = "",
+        .created_at = "",
+        .secret_ref = secret_ref,
+    });
 
     const result = try std.process.Child.run(.{
         .allocator = allocator,
@@ -3004,6 +3018,10 @@ const WindowsHiddenConsoleInput = struct {
     original_mode: c.DWORD,
 };
 
+fn trimPromptInput(input: []const u8) []const u8 {
+    return std.mem.trimRight(u8, input, "\r\n");
+}
+
 fn promptSecret(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
     var stdout_file = std.fs.File.stdout();
     try stdout_file.writeAll(prompt);
@@ -3038,7 +3056,7 @@ fn promptSecret(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
     var stdin_file = std.fs.File.stdin();
     var buf: [4096]u8 = undefined;
     const n = try stdin_file.read(&buf);
-    return allocator.dupe(u8, std.mem.trimRight(u8, buf[0..n], "\r\n"));
+    return allocator.dupe(u8, trimPromptInput(buf[0..n]));
 }
 
 fn enableWindowsHiddenConsoleInput() ?WindowsHiddenConsoleInput {
@@ -3963,21 +3981,62 @@ test "windows platform secure store round trips via DPAPI" {
     try std.testing.expectEqualStrings(created.secret_ref.?, loaded.secret_ref.?);
 }
 
+test "windows prompt fallback trims CRLF from redirected input" {
+    if (builtin.os.tag != .windows) return;
+
+    try std.testing.expectEqualStrings("hunter2", trimPromptInput("hunter2\r\n"));
+    try std.testing.expectEqualStrings("hunter2", trimPromptInput("hunter2\n"));
+    try std.testing.expectEqualStrings("", trimPromptInput("\r\n"));
+}
+
 test "macos keychain secret refs are strict and versioned" {
     const allocator = std.testing.allocator;
 
     const secret_ref = try formatMacOsKeychainSecretRef(allocator, 7);
     defer allocator.free(secret_ref);
+    const account = try formatMacOsKeychainAccount(allocator, 7);
+    defer allocator.free(account);
+    const label = try formatMacOsKeychainLabel(allocator, 7);
+    defer allocator.free(label);
 
     const parsed = try parseMacOsKeychainSecretRef(secret_ref);
     try std.testing.expectEqualStrings(macos_keychain_service, parsed.service);
-    try std.testing.expectEqualStrings("dek:7", parsed.account);
+    try std.testing.expectEqualStrings(account, parsed.account);
     try std.testing.expectEqual(@as(u32, 7), parsed.key_version);
+    try std.testing.expectEqualStrings("ugrant DEK wrap secret (7)", label);
 
     try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=wrong;account=dek:7"));
     try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-store;account=wrong:7"));
     try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:"));
     try std.testing.expectError(error.InvalidWrappedDek, parseMacOsKeychainSecretRef("macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:7;extra=x"));
+}
+
+test "macos keychain records reject malformed refs and version mismatches" {
+    const allocator = std.testing.allocator;
+
+    var record = WrappedDekRecord{
+        .version = 3,
+        .backend = try allocator.dupe(u8, "platform-secure-store"),
+        .key_version = 4,
+        .salt_b64 = try allocator.dupe(u8, "salt"),
+        .nonce_b64 = try allocator.dupe(u8, "nonce"),
+        .ciphertext_b64 = try allocator.dupe(u8, "cipher"),
+        .created_at = try allocator.dupe(u8, "123"),
+        .secret_ref = try formatMacOsKeychainSecretRef(allocator, 4),
+    };
+    defer freeWrappedDekRecord(allocator, record);
+
+    const parsed = try validateMacOsKeychainRecord(record);
+    try std.testing.expectEqualStrings("dek:4", parsed.account);
+    try std.testing.expectEqual(@as(u32, 4), parsed.key_version);
+
+    record.key_version = 5;
+    try std.testing.expectError(error.InvalidWrappedDek, validateMacOsKeychainRecord(record));
+    record.key_version = 4;
+
+    allocator.free(record.secret_ref.?);
+    record.secret_ref = try allocator.dupe(u8, "macos-keychain:service=dev.ugrant.platform-secure-store;account=dek:");
+    try std.testing.expectError(error.InvalidWrappedDek, validateMacOsKeychainRecord(record));
 }
 
 test "macos keychain secret refs reject malformed prefixes and numeric versions" {
@@ -4656,6 +4715,44 @@ test "rekey can switch between secure enclave and plain platform store metadata"
     defer freeGrant(allocator, grant);
     try std.testing.expectEqualStrings("access-token-abc", grant.access_token.?);
     try std.testing.expectEqualStrings("refresh-token-def", grant.refresh_token.?);
+}
+
+test "rekey can migrate passphrase-backed state to macos keychain metadata" {
+    const allocator = std.testing.allocator;
+    var vault = try setupTestVault();
+    defer vault.deinit(allocator);
+
+    _ = try performRekey(allocator, vault.db, vault.keys_path, vault.wrapped, "insecure-local-keyfile", "passphrase", "switch-passphrase", null, null, null, null, false);
+    const passphrase_record = try loadWrappedDek(allocator, vault.keys_path);
+    defer freeWrappedDekRecord(allocator, passphrase_record);
+    const passphrase_dek = try unwrapDekWithSecret(allocator, passphrase_record, "switch-passphrase");
+    defer allocator.free(passphrase_dek);
+
+    const secret_ref = try formatMacOsKeychainSecretRef(allocator, passphrase_record.key_version + 1);
+    defer allocator.free(secret_ref);
+
+    const stats = try performRekey(allocator, vault.db, vault.keys_path, passphrase_record, "switch-passphrase", "platform-secure-store", "platform-store-test-secret", secret_ref, null, null, null, false);
+    try std.testing.expectEqual(@as(u32, 3), stats.key_version);
+
+    const updated_record = try loadWrappedDek(allocator, vault.keys_path);
+    defer freeWrappedDekRecord(allocator, updated_record);
+    try std.testing.expectEqualStrings("platform-secure-store", updated_record.backend);
+    try std.testing.expectEqualStrings(secret_ref, updated_record.secret_ref.?);
+
+    const parsed = try validateMacOsKeychainRecord(updated_record);
+    try std.testing.expectEqualStrings(macos_keychain_service, parsed.service);
+    try std.testing.expectEqualStrings("dek:3", parsed.account);
+    try std.testing.expectEqual(@as(u32, 3), parsed.key_version);
+
+    const new_dek = try unwrapDekWithSecret(allocator, updated_record, "platform-store-test-secret");
+    defer allocator.free(new_dek);
+    try std.testing.expect(!std.mem.eql(u8, passphrase_dek, new_dek));
+
+    const grant = try loadGrant(allocator, vault.db, "watcher", new_dek);
+    defer freeGrant(allocator, grant);
+    try std.testing.expectEqualStrings("access-token-abc", grant.access_token.?);
+    try std.testing.expectEqualStrings("refresh-token-def", grant.refresh_token.?);
+    try std.testing.expectEqualStrings("id-token-ghi", grant.id_token.?);
 }
 
 test "macos platform secure store hook supports rekey migration" {

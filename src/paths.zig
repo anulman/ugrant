@@ -422,15 +422,24 @@ fn macOsSecureEnclaveAvailable(allocator: std.mem.Allocator) bool {
     return commandExists(allocator, "sc_auth");
 }
 
+fn platformSecureStoreAvailableForOs(os_tag: std.Target.Os.Tag, platform_store_test_available: bool, secret_tool_available: bool, has_dbus_session: bool) bool {
+    if (platform_store_test_available) return true;
+    if (os_tag == .windows or os_tag == .macos) return true;
+    return secret_tool_available and has_dbus_session;
+}
+
 pub fn backendAvailable(allocator: std.mem.Allocator, backend: []const u8) bool {
     if (std.mem.eql(u8, backend, "tpm2")) {
         if (envTruthy("UGRANT_TEST_TPM2_AVAILABLE")) return true;
         return commandExists(allocator, "tpm2_create") and commandExists(allocator, "tpm2_unseal") and commandExists(allocator, "tpm2_createprimary") and commandExists(allocator, "tpm2_load");
     }
     if (std.mem.eql(u8, backend, "platform-secure-store")) {
-        if (envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE")) return true;
-        if (builtin.os.tag == .windows or builtin.os.tag == .macos) return true;
-        return commandExists(allocator, "secret-tool") and envVarExists("DBUS_SESSION_BUS_ADDRESS");
+        return platformSecureStoreAvailableForOs(
+            builtin.os.tag,
+            envTruthy("UGRANT_TEST_PLATFORM_STORE_AVAILABLE"),
+            commandExists(allocator, "secret-tool"),
+            envVarExists("DBUS_SESSION_BUS_ADDRESS"),
+        );
     }
     if (std.mem.eql(u8, backend, "macos-secure-enclave")) return macOsSecureEnclaveAvailable(allocator);
     if (std.mem.eql(u8, backend, "passphrase")) return true;
@@ -438,10 +447,14 @@ pub fn backendAvailable(allocator: std.mem.Allocator, backend: []const u8) bool 
     return false;
 }
 
-pub fn resolvePlatformSecureStoreBackend(tpm2_available: bool, platform_store_available: bool) ![]const u8 {
-    if (builtin.os.tag == .linux and tpm2_available) return "tpm2";
+pub fn resolvePlatformSecureStoreBackendForOs(os_tag: std.Target.Os.Tag, tpm2_available: bool, platform_store_available: bool) ![]const u8 {
+    if (os_tag == .linux and tpm2_available) return "tpm2";
     if (platform_store_available) return "platform-secure-store";
     return error.WrapBackendUnavailable;
+}
+
+pub fn resolvePlatformSecureStoreBackend(tpm2_available: bool, platform_store_available: bool) ![]const u8 {
+    return resolvePlatformSecureStoreBackendForOs(builtin.os.tag, tpm2_available, platform_store_available);
 }
 
 pub fn resolveBackendChoice(requested_backend: ?[]const u8, allow_insecure: bool, tpm2_available: bool, platform_store_available: bool, macos_secure_enclave_available: bool) ![]const u8 {
@@ -502,6 +515,22 @@ test "platform secure store is always available on macos" {
     try std.testing.expectEqualStrings("macos-secure-enclave", try chooseInitBackend(std.testing.allocator, null, false));
 }
 
+test "platform secure store availability rules cover macos and windows without host gating" {
+    try std.testing.expect(platformSecureStoreAvailableForOs(.macos, false, false, false));
+    try std.testing.expect(platformSecureStoreAvailableForOs(.windows, false, false, false));
+    try std.testing.expect(platformSecureStoreAvailableForOs(.linux, false, true, true));
+    try std.testing.expect(!platformSecureStoreAvailableForOs(.linux, false, true, false));
+    try std.testing.expect(!platformSecureStoreAvailableForOs(.linux, false, false, true));
+}
+
+test "platform secure store backend resolution keeps keychain on macos and windows" {
+    try std.testing.expectEqualStrings("platform-secure-store", try resolvePlatformSecureStoreBackendForOs(.macos, true, true));
+    try std.testing.expectEqualStrings("platform-secure-store", try resolvePlatformSecureStoreBackendForOs(.windows, true, true));
+    try std.testing.expectEqualStrings("tpm2", try resolvePlatformSecureStoreBackendForOs(.linux, true, true));
+    try std.testing.expectEqualStrings("platform-secure-store", try resolvePlatformSecureStoreBackendForOs(.linux, false, true));
+    try std.testing.expectError(error.WrapBackendUnavailable, resolvePlatformSecureStoreBackendForOs(.macos, false, false));
+}
+
 test "default backend selection prefers strongest available backend" {
     try std.testing.expectEqualStrings("tpm2", try resolveBackendChoice(null, false, true, true, true));
     if (builtin.os.tag == .macos) {
@@ -514,10 +543,21 @@ test "default backend selection prefers strongest available backend" {
     try std.testing.expectEqualStrings("passphrase", try resolveBackendChoice(null, false, false, false, false));
 }
 
-test "windows home dir resolution prefers USERPROFILE over HOMEDRIVE and HOMEPATH" {
+test "windows home dir resolution prefers HOME then USERPROFILE then HOMEDRIVE and HOMEPATH" {
     if (builtin.os.tag != .windows) return;
 
     const allocator = std.testing.allocator;
+
+    const from_home = try resolveHomeDirFromValues(
+        allocator,
+        true,
+        "C:\\override",
+        "C:\\Users\\Aidan",
+        "D:",
+        "\\Users\\Fallback",
+    );
+    defer allocator.free(from_home);
+    try std.testing.expectEqualStrings("C:\\override", from_home);
 
     const from_profile = try resolveHomeDirFromValues(
         allocator,
@@ -542,6 +582,22 @@ test "windows home dir resolution prefers USERPROFILE over HOMEDRIVE and HOMEPAT
     try std.testing.expectEqualStrings("D:\\Users\\Fallback", from_drive_path);
 
     try std.testing.expectError(error.MissingHome, resolveHomeDirFromValues(allocator, true, null, null, "D:", null));
+    try std.testing.expectError(error.MissingHome, resolveHomeDirFromValues(allocator, true, null, null, null, null));
+}
+
+test "windows command lookup distinguishes present and missing commands" {
+    if (builtin.os.tag != .windows) return;
+
+    try std.testing.expect(commandExists(std.testing.allocator, "where.exe"));
+    try std.testing.expect(!commandExists(std.testing.allocator, "ugrant-command-should-not-exist-8d9d9a69"));
+}
+
+test "windows platform secure store selection does not fall back to TPM2" {
+    if (builtin.os.tag != .windows) return;
+
+    try std.testing.expectEqualStrings("platform-secure-store", try resolvePlatformSecureStoreBackend(true, true));
+    try std.testing.expectEqualStrings("platform-secure-store", try resolveBackendChoice("platform-secure-store", false, true, true, false));
+    try std.testing.expectError(error.WrapBackendUnavailable, resolveBackendChoice("platform-secure-store", false, true, false, false));
 }
 
 test "windows base dir resolution prefers AppData env vars" {
