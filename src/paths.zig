@@ -477,7 +477,6 @@ pub fn resolveBackendChoice(requested_backend: ?[]const u8, allow_insecure: bool
     }
 
     if (tpm2_available) return "tpm2";
-    if (builtin.os.tag == .macos and macos_secure_enclave_available) return "macos-secure-enclave";
     if (platform_store_available) return "platform-secure-store";
     if (macos_secure_enclave_available) return "macos-secure-enclave";
     return "passphrase";
@@ -512,7 +511,7 @@ test "platform secure store is always available on macos" {
     if (builtin.os.tag != .macos) return;
 
     try std.testing.expect(backendAvailable(std.testing.allocator, "platform-secure-store"));
-    try std.testing.expectEqualStrings("macos-secure-enclave", try chooseInitBackend(std.testing.allocator, null, false));
+    try std.testing.expectEqualStrings("platform-secure-store", try chooseInitBackend(std.testing.allocator, null, false));
 }
 
 test "platform secure store availability rules cover macos and windows without host gating" {
@@ -531,13 +530,9 @@ test "platform secure store backend resolution keeps keychain on macos and windo
     try std.testing.expectError(error.WrapBackendUnavailable, resolvePlatformSecureStoreBackendForOs(.macos, false, false));
 }
 
-test "default backend selection prefers strongest available backend" {
+test "default backend selection prefers platform secure store before secure enclave" {
     try std.testing.expectEqualStrings("tpm2", try resolveBackendChoice(null, false, true, true, true));
-    if (builtin.os.tag == .macos) {
-        try std.testing.expectEqualStrings("macos-secure-enclave", try resolveBackendChoice(null, false, false, true, true));
-    } else {
-        try std.testing.expectEqualStrings("platform-secure-store", try resolveBackendChoice(null, false, false, true, true));
-    }
+    try std.testing.expectEqualStrings("platform-secure-store", try resolveBackendChoice(null, false, false, true, true));
     try std.testing.expectEqualStrings("platform-secure-store", try resolveBackendChoice(null, false, false, true, false));
     try std.testing.expectEqualStrings("macos-secure-enclave", try resolveBackendChoice(null, false, false, false, true));
     try std.testing.expectEqualStrings("passphrase", try resolveBackendChoice(null, false, false, false, false));
