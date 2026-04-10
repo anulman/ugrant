@@ -1661,21 +1661,12 @@ const macos_secure_enclave_helper_script =
     "    return data\n" ++
     "}\n" ++
     "func wrapKey(privateKey: SecKey, publicKey: SecKey) -> SymmetricKey {\n" ++
-    "    let algorithm = SecKeyAlgorithm.ecdhKeyExchangeStandard\n" ++
-    "    debugLog(\"wrapKey start algorithm=\\(algorithm)\")\n" ++
-    "    guard SecKeyIsAlgorithmSupported(privateKey, .keyExchange, algorithm) else {\n" ++
-    "        fail(\"ECDH cofactor X9.63 SHA-256 key exchange is not supported for this key\", reason: \"unavailable\")\n" ++
-    "    }\n" ++
-    "    var error: Unmanaged<CFError>?\n" ++
-    "    let keySize = 32\n" ++
-    "    let parameters: [SecKeyKeyExchangeParameter: Any] = [\n" ++
-    "        SecKeyKeyExchangeParameter.requestedSize: keySize,\n" ++
-    "    ]\n" ++
-    "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, parameters as CFDictionary, &error) as Data? else {\n" ++
-    "        let failure = secError(error)\n" ++
-    "        fail(\"wrap key derivation failed: \\(failure.message)\", reason: failure.reason)\n" ++
-    "    }\n" ++
-    "    return SymmetricKey(data: data)\n" ++
+    "    let secret = sharedSecret(privateKey: privateKey, publicKey: publicKey)\n" ++
+    "    var material = Data()\n" ++
+    "    material.append(secret)\n" ++
+    "    material.append(wrapMaterialInfo)\n" ++
+    "    let digest = SHA256.hash(data: material)\n" ++
+    "    return SymmetricKey(data: Data(digest))\n" ++
     "}\n" ++
     "func sealWrapMaterial(secret: Data, key: SymmetricKey) -> [String: Any] {\n" ++
     "    do {\n" ++
