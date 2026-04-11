@@ -1556,7 +1556,7 @@ const macos_secure_enclave_helper_script =
     "    let digest = SHA256.hash(data: publicKeyData(key))\n" ++
     "    return digest.map { String(format: \"%02x\", $0) }.joined()\n" ++
     "}\n" ++
-    "func findCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> SecKey? {\n" ++
+    "func findCtkPrivateKeys(label: String, expectedPublicKeyHash: String? = nil) -> [SecKey] {\n" ++
     "    let labelData = label.data(using: .utf8)!\n" ++
     "    let candidateQueries: [[String: Any]] = [\n" ++
     "        [\n" ++
@@ -1625,15 +1625,19 @@ const macos_secure_enclave_helper_script =
     "                debugLog(\"findCtkPrivateKey candidate hash mismatched expected sc_auth hash, accepting label-scoped key anyway\")\n" ++
     "            }\n" ++
     "            debugLog(\"findCtkPrivateKey matched candidate hash=\\(hash) via query#\\(queryIndex + 1)\")\n" ++
-    "            return key\n" ++
     "        }\n" ++
     "    }\n" ++
-    "    return nil\n" ++
+    "    return []\n" ++
+    "}\n" ++
+    "func findCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> SecKey? {\n" ++
+    "    let keys = findCtkPrivateKeys(label: label, expectedPublicKeyHash: expectedPublicKeyHash)\n" ++
+    "    return keys.first\n" ++
     "}\n" ++
     "func loadCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil, retries: Int = 20, retryDelaySeconds: Double = 0.1) -> SecKey {\n" ++
     "    for attempt in 0...max(0, retries) {\n" ++
-    "        if let key = findCtkPrivateKey(label: label, expectedPublicKeyHash: expectedPublicKeyHash) {\n" ++
-    "            debugLog(\"loadCtkPrivateKey success attempt=\\(attempt + 1) label=\\(label) expectedHash=\\(expectedPublicKeyHash ?? \"<none>\")\")\n" ++
+    "        let keys = findCtkPrivateKeys(label: label, expectedPublicKeyHash: expectedPublicKeyHash)\n" ++
+    "        if let key = keys.first {\n" ++
+    "            debugLog(\"loadCtkPrivateKey success attempt=\\(attempt + 1) label=\\(label) expectedHash=\\(expectedPublicKeyHash ?? \"<none>\") candidateCount=\\(keys.count)\")\n" ++
     "            return key\n" ++
     "        }\n" ++
     "        if attempt < retries {\n" ++
@@ -1697,6 +1701,30 @@ const macos_secure_enclave_helper_script =
     "    let context = LAContext()\n" ++
     "    context.interactionNotAllowed = false\n" ++
     "    return context\n" ++
+    "}\n" ++
+    "func debugProbeCtkCandidates(label: String, expectedPublicKeyHash: String? = nil, publicKey: SecKey) {\n" ++
+    "    let keys = findCtkPrivateKeys(label: label, expectedPublicKeyHash: expectedPublicKeyHash)\n" ++
+    "    debugLog(\"debugProbeCtkCandidates count=\\(keys.count) label=\\(label) expectedHash=\\(expectedPublicKeyHash ?? \"<none>\")\")\n" ++
+    "    for (index, key) in keys.enumerated() {\n" ++
+    "        let supported = SecKeyIsAlgorithmSupported(key, .keyExchange, .ecdhKeyExchangeStandard)\n" ++
+    "        let helperHash: String\n" ++
+    "        if let candidatePublic = SecKeyCopyPublicKey(key) {\n" ++
+    "            helperHash = publicKeyHashHex(candidatePublic)\n" ++
+    "        } else {\n" ++
+    "            helperHash = \"<missing-public-key>\"\n" ++
+    "        }\n" ++
+    "        debugLog(\"debugProbeCtkCandidates candidate[\\(index)] helperHash=\\(helperHash) supported=\\(supported)\")\n" ++
+    "        if !supported { continue }\n" ++
+    "        var error: Unmanaged<CFError>?\n" ++
+    "        let params = NSMutableDictionary()\n" ++
+    "        params[kSecUseAuthenticationContext] = keyExchangeContext()\n" ++
+    "        if let data = SecKeyCopyKeyExchangeResult(key, .ecdhKeyExchangeStandard, publicKey, params, &error) as Data? {\n" ++
+    "            debugLog(\"debugProbeCtkCandidates candidate[\\(index)] exchange=success bytes=\\(data.count)\")\n" ++
+    "        } else {\n" ++
+    "            let failure = secError(error)\n" ++
+    "            debugLog(\"debugProbeCtkCandidates candidate[\\(index)] exchange=failed message=\\(failure.message) reason=\\(failure.reason)\")\n" ++
+    "        }\n" ++
+    "    }\n" ++
     "}\n" ++
     "func sharedSecret(privateKey: SecKey, publicKey: SecKey) -> Data {\n" ++
     "    let algorithms: [(String, SecKeyAlgorithm)] = [\n" ++
@@ -1884,6 +1912,7 @@ const macos_secure_enclave_helper_script =
     "    debugLog(\"load-ctk decoded ephemeral public key bytes=\\(ephemeralPub.count)\")\n" ++
     "    let enclaveKey = loadCtkPrivateKey(label: args[2], expectedPublicKeyHash: args[3])\n" ++
     "    debugLog(\"load-ctk CTK private key loaded\")\n" ++
+    "    debugProbeCtkCandidates(label: args[2], expectedPublicKeyHash: args[3], publicKey: publicKeyFromData(ephemeralPub))\n" ++
     "    guard let derivedPublicKey = SecKeyCopyPublicKey(enclaveKey) else { fail(\"load-ctk loaded key missing public key\") }\n" ++
     "    let derivedHash = publicKeyHashHex(derivedPublicKey)\n" ++
     "    debugLog(\"load-ctk loaded key public hash=\\(derivedHash)\")\n" ++
