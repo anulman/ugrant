@@ -1963,13 +1963,17 @@ fn formatMacOsSecureEnclaveApplicationTag(allocator: std.mem.Allocator, key_vers
 }
 
 fn formatMacOsSecureEnclaveSecretRefForParts(allocator: std.mem.Allocator, label: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}{s}", .{ macos_secure_enclave_secret_ref_prefix, label });
+    return std.fmt.allocPrint(allocator, "{s}label={s}", .{ macos_secure_enclave_secret_ref_prefix, label });
 }
 
 fn parseMacOsSecureEnclaveSecretRef(secret_ref: []const u8) !MacOsSecureEnclaveRef {
     if (!std.mem.startsWith(u8, secret_ref, macos_secure_enclave_secret_ref_prefix)) return error.InvalidWrappedDek;
     const rest = secret_ref[macos_secure_enclave_secret_ref_prefix.len..];
-    const label = rest;
+    const label = if (std.mem.startsWith(u8, rest, "label=")) blk: {
+        const value = rest["label=".len..];
+        const end = std.mem.indexOfScalar(u8, value, ';') orelse value.len;
+        break :blk value[0..end];
+    } else rest;
     if (label.len == 0) return error.InvalidWrappedDek;
     if (!std.mem.startsWith(u8, label, macos_secure_enclave_application_tag_prefix)) return error.InvalidWrappedDek;
     const key_version_text = label[macos_secure_enclave_application_tag_prefix.len..];
