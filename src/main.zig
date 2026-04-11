@@ -2215,10 +2215,18 @@ fn finishMacOsSecureEnclaveHelperResult(allocator: std.mem.Allocator, result: st
             if (parseMacOsSecureEnclaveFailureFromJson(allocator, result.stderr)) |failure| {
                 return .{ .failure = failure };
             }
-            const message = std.mem.trim(u8, if (result.stderr.len > 0) result.stderr else result.stdout, "\r\n\t ");
-            return .{ .failure = .{ .reason = .unavailable, .message = if (message.len > 0) try allocator.dupe(u8, message) else null } };
+            const stdout_trimmed = std.mem.trim(u8, result.stdout, "\r\n\t ");
+            const stderr_trimmed = std.mem.trim(u8, result.stderr, "\r\n\t ");
+            const stdout_tail = if (stdout_trimmed.len > 400) stdout_trimmed[stdout_trimmed.len - 400 ..] else stdout_trimmed;
+            const stderr_tail = if (stderr_trimmed.len > 400) stderr_trimmed[stderr_trimmed.len - 400 ..] else stderr_trimmed;
+            const message = try std.fmt.allocPrint(allocator, "helper exited code={} stdout={s} stderr={s}", .{ code, stdout_tail, stderr_tail });
+            return .{ .failure = .{ .reason = .unavailable, .message = message } };
         },
-        else => return .{ .failure = .{ .reason = .unavailable, .message = try allocator.dupe(u8, "macOS Secure Enclave helper terminated unexpectedly") } },
+        else => {
+            const stdout_tail = if (result.stdout.len > 400) result.stdout[result.stdout.len - 400 ..] else result.stdout;
+            const stderr_tail = if (result.stderr.len > 400) result.stderr[result.stderr.len - 400 ..] else result.stderr;
+            return .{ .failure = .{ .reason = .unavailable, .message = try std.fmt.allocPrint(allocator, "macOS Secure Enclave helper terminated unexpectedly term={any} stdout={s} stderr={s}", .{ result.term, stdout_tail, stderr_tail }) } };
+        },
     }
 }
 
