@@ -1891,8 +1891,17 @@ const macos_secure_enclave_helper_script =
     "            fail(\"stored wrap material does not match wrapped-key metadata\")\n" ++
     "        }\n" ++
     "        debugLog(\"load-ctk deriving wrap key from stored material\")\n" ++
-    "        secret = openWrapMaterial(payload: payload, key: wrapKey(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub)))\n" ++
-    "        debugLog(\"load-ctk unwrapped stored material successfully\")\n" ++
+    "        do {\n" ++
+    "            secret = try { () -> Data in\n" ++
+    "                let key = wrapKey(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))\n" ++
+    "                return openWrapMaterial(payload: payload, key: key)\n" ++
+    "            }()\n" ++
+    "            debugLog(\"load-ctk unwrapped stored material successfully\")\n" ++
+    "        } catch {\n" ++
+    "            debugLog(\"load-ctk stored wrap path failed, falling back to raw shared secret: \\(error)\")\n" ++
+    "            secret = sharedSecret(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))\n" ++
+    "            debugLog(\"load-ctk derived shared secret successfully after fallback\")\n" ++
+    "        }\n" ++
     "    } else {\n" ++
     "        debugLog(\"load-ctk no stored wrap material, using raw shared secret path\")\n" ++
     "        secret = sharedSecret(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))\n" ++
