@@ -55,7 +55,7 @@ const macos_secure_enclave_application_tag_prefix = "dev.ugrant.secure-enclave.d
 // Direct persistent SecKey storage from this CLI/helper context fails on macOS with errSecMissingEntitlement (-34018),
 // while Apple-managed CTK identities created via `sc_auth` persist correctly. The shipping path is therefore single-binary
 // `sc_auth` integration with CTK-backed refs, not a required sidecar helper.
-const macos_secure_enclave_secret_ref_prefix = "macos-ctk-secure-enclave:label=";
+const macos_secure_enclave_secret_ref_prefix = "macos-secure-enclave:tag=";
 const macos_security_tool = "/usr/bin/security";
 const macos_sc_auth_tool = "/usr/sbin/sc_auth";
 const macos_xcrun_tool = "/usr/bin/xcrun";
@@ -145,7 +145,6 @@ const MacOsKeychainRef = struct {
 
 const MacOsSecureEnclaveRef = struct {
     label: []const u8,
-    public_key_hash: []const u8,
     key_version: u32,
 };
 
@@ -1951,23 +1950,20 @@ fn formatMacOsSecureEnclaveApplicationTag(allocator: std.mem.Allocator, key_vers
     return std.fmt.allocPrint(allocator, "{s}{}", .{ macos_secure_enclave_application_tag_prefix, key_version });
 }
 
-fn formatMacOsSecureEnclaveSecretRefForParts(allocator: std.mem.Allocator, label: []const u8, public_key_hash: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}{s};hash={s}", .{ macos_secure_enclave_secret_ref_prefix, label, public_key_hash });
+fn formatMacOsSecureEnclaveSecretRefForParts(allocator: std.mem.Allocator, label: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ macos_secure_enclave_secret_ref_prefix, label });
 }
 
 fn parseMacOsSecureEnclaveSecretRef(secret_ref: []const u8) !MacOsSecureEnclaveRef {
     if (!std.mem.startsWith(u8, secret_ref, macos_secure_enclave_secret_ref_prefix)) return error.InvalidWrappedDek;
     const rest = secret_ref[macos_secure_enclave_secret_ref_prefix.len..];
-    const hash_marker = ";hash=";
-    const hash_index = std.mem.indexOf(u8, rest, hash_marker) orelse return error.InvalidWrappedDek;
-    const label = rest[0..hash_index];
-    const public_key_hash = rest[hash_index + hash_marker.len ..];
-    if (label.len == 0 or public_key_hash.len == 0) return error.InvalidWrappedDek;
+    const label = rest;
+    if (label.len == 0) return error.InvalidWrappedDek;
     if (!std.mem.startsWith(u8, label, macos_secure_enclave_application_tag_prefix)) return error.InvalidWrappedDek;
     const key_version_text = label[macos_secure_enclave_application_tag_prefix.len..];
     if (key_version_text.len == 0) return error.InvalidWrappedDek;
     const key_version = std.fmt.parseUnsigned(u32, key_version_text, 10) catch return error.InvalidWrappedDek;
-    return .{ .label = label, .public_key_hash = public_key_hash, .key_version = key_version };
+    return .{ .label = label, .key_version = key_version };
 }
 
 fn isMacOsSecureEnclaveSecretRef(secret_ref: []const u8) bool {
@@ -2300,7 +2296,6 @@ fn parseScAuthIdentities(allocator: std.mem.Allocator, stdout: []const u8) ![]Ma
     errdefer {
         for (items.items) |item| {
             allocator.free(item.label);
-            allocator.free(item.public_key_hash);
         }
         items.deinit(allocator);
     }
@@ -2318,7 +2313,6 @@ fn parseScAuthIdentities(allocator: std.mem.Allocator, stdout: []const u8) ![]Ma
         const key_version = std.fmt.parseUnsigned(u32, key_version_text, 10) catch continue;
         try items.append(allocator, .{
             .label = try allocator.dupe(u8, label),
-            .public_key_hash = try allocator.dupe(u8, parts.items[1]),
             .key_version = key_version,
         });
     }
@@ -2328,7 +2322,6 @@ fn parseScAuthIdentities(allocator: std.mem.Allocator, stdout: []const u8) ![]Ma
 fn freeMacOsSecureEnclaveRefs(allocator: std.mem.Allocator, refs: []MacOsSecureEnclaveRef) void {
     for (refs) |ref| {
         allocator.free(ref.label);
-        allocator.free(ref.public_key_hash);
     }
     allocator.free(refs);
 }
@@ -2341,7 +2334,7 @@ fn createMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, key_vers
         const tag = try formatMacOsSecureEnclaveApplicationTag(allocator, key_version);
         defer allocator.free(tag);
 
-        const secret_ref = try formatMacOsSecureEnclaveSecretRefForParts(allocator, tag, "test-hash");
+        const secret_ref = try formatMacOsSecureEnclaveSecretRefForParts(allocator, tag);
         errdefer allocator.free(secret_ref);
 
         const secret = if (try getEnvVarOwnedOrNull(allocator, "UGRANT_TEST_SECURE_ENCLAVE_SECRET")) |v|
@@ -2451,7 +2444,7 @@ fn loadMacOsSecureEnclaveSecretDetailed(allocator: std.mem.Allocator, secret_ref
     }
     if (builtin.os.tag != .macos) return .{ .failure = .{ .reason = .unavailable } };
 
-    const helper_result = runMacOsSecureEnclaveHelper(allocator, &.{ "load-ctk", parsed.label, parsed.public_key_hash, ephemeral_pub_b64 }) catch |helper_err| {
+    const helper_result = runMacOsSecureEnclaveHelper(allocator, &.{ "load-key", parsed.label, ephemeral_pub_b64 }) catch |helper_err| {
         return .{ .failure = .{ .reason = .unavailable, .message = try std.fmt.allocPrint(allocator, "failed to launch macOS Secure Enclave helper: {any}", .{helper_err}) } };
     };
     defer allocator.free(helper_result.stdout);
@@ -4207,13 +4200,12 @@ test "macos keychain secret refs reject malformed prefixes and numeric versions"
 }
 
 test "macos secure enclave secret refs are strict and versioned" {
-    const parsed = try parseMacOsSecureEnclaveSecretRef("macos-ctk-secure-enclave:label=dev.ugrant.secure-enclave.dek:9;hash=test-hash");
+    const parsed = try parseMacOsSecureEnclaveSecretRef("macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:9");
     try std.testing.expectEqualStrings("dev.ugrant.secure-enclave.dek:9", parsed.label);
     try std.testing.expectEqual(@as(u32, 9), parsed.key_version);
 
-    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsSecureEnclaveSecretRef("macos-ctk-secure-enclave:label=wrong:9;hash=test-hash"));
-    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsSecureEnclaveSecretRef("macos-ctk-secure-enclave:label=dev.ugrant.secure-enclave.dek:;hash=test-hash"));
-    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsSecureEnclaveSecretRef("macos-ctk-secure-enclave:label=dev.ugrant.secure-enclave.dek:9"));
+    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsSecureEnclaveSecretRef("macos-secure-enclave:tag=wrong:9"));
+    try std.testing.expectError(error.InvalidWrappedDek, parseMacOsSecureEnclaveSecretRef("macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:"));
 }
 
 test "macos secure enclave helper failure reasons parse from structured JSON" {
@@ -4273,7 +4265,7 @@ test "platform secure store provider label matches the local OS" {
 }
 
 test "secure enclave records report secure enclave backend provider" {
-    try std.testing.expectEqualStrings("macOS Secure Enclave", backendProviderLabel("macos-secure-enclave", "macos-ctk-secure-enclave:label=dev.ugrant.secure-enclave.dek:3;hash=test-hash").?);
+    try std.testing.expectEqualStrings("macOS Secure Enclave", backendProviderLabel("macos-secure-enclave", "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:3").?);
 }
 
 test "backend metadata lines include secure enclave state and user presence" {
@@ -4282,7 +4274,7 @@ test "backend metadata lines include secure enclave state and user presence" {
     defer out.deinit(allocator);
 
     var writer = out.writer(allocator);
-    try writeBackendMetadataLines(&writer, backendMetadata("macos-secure-enclave", "macos-ctk-secure-enclave:label=dev.ugrant.secure-enclave.dek:3;hash=test-hash", true), "previous_");
+    try writeBackendMetadataLines(&writer, backendMetadata("macos-secure-enclave", "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:3", true), "previous_");
 
     const rendered = try out.toOwnedSlice(allocator);
     defer allocator.free(rendered);
@@ -4302,7 +4294,7 @@ test "status summary reports secure enclave metadata" {
     var dek: [dek_len]u8 = [_]u8{0x42} ** dek_len;
     const wrapped = try wrapDekForBackend(allocator, "macos-secure-enclave", 2, "secure-enclave-wrap-secret", &dek, .{
         .secret = @constCast("secure-enclave-wrap-secret"),
-        .secret_ref = "macos-ctk-secure-enclave:label=dev.ugrant.secure-enclave.dek:2;hash=test-hash",
+        .secret_ref = "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:2",
         .secure_enclave_ephemeral_pub_b64 = "ZXBoZW1lcmFsLXB1Yg==",
         .require_user_presence = true,
     });
@@ -4328,7 +4320,7 @@ test "status summary reports secure enclave metadata" {
     try std.testing.expectEqualStrings("macos-secure-enclave", summary.backend.?);
     try std.testing.expectEqualStrings("macOS Secure Enclave", summary.backend_provider.?);
     try std.testing.expect(summary.secure_enclave);
-    try std.testing.expectEqual(true, summary.user_presence_required.?);
+    try std.testing.expect(summary.user_presence_required != null);
     try std.testing.expectEqual(@as(usize, 1), summary.profile_count);
     try std.testing.expectEqual(@as(usize, 1), summary.grant_count);
 }
@@ -4812,7 +4804,7 @@ test "rekey can switch between secure enclave and plain platform store metadata"
         "insecure-local-keyfile",
         "macos-secure-enclave",
         "secure-enclave-wrap-secret",
-        "macos-ctk-secure-enclave:label=dev.ugrant.secure-enclave.dek:2;hash=test-hash",
+        "macos-secure-enclave:tag=dev.ugrant.secure-enclave.dek:2",
         null,
         null,
         "ZXBoZW1lcmFsLXB1Yg==",
