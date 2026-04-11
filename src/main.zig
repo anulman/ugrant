@@ -1557,7 +1557,30 @@ const macos_secure_enclave_helper_script =
     "    return digest.map { String(format: \"%02x\", $0) }.joined()\n" ++
     "}\n" ++
     "func findCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil) -> SecKey? {\n" ++
+    "    let labelData = label.data(using: .utf8)!\n" ++
     "    let candidateQueries: [[String: Any]] = [\n" ++
+    "        [\n" ++
+    "            kSecClass as String: kSecClassIdentity,\n" ++
+    "            kSecAttrLabel as String: label,\n" ++
+    "            kSecReturnRef as String: true,\n" ++
+    "            kSecMatchLimit as String: kSecMatchLimitAll,\n" ++
+    "        ],\n" ++
+    "        [\n" ++
+    "            kSecClass as String: kSecClassKey,\n" ++
+    "            kSecAttrApplicationTag as String: labelData,\n" ++
+    "            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,\n" ++
+    "            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
+    "            kSecReturnRef as String: true,\n" ++
+    "            kSecMatchLimit as String: kSecMatchLimitAll,\n" ++
+    "        ],\n" ++
+    "        [\n" ++
+    "            kSecClass as String: kSecClassKey,\n" ++
+    "            kSecAttrApplicationLabel as String: labelData,\n" ++
+    "            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,\n" ++
+    "            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
+    "            kSecReturnRef as String: true,\n" ++
+    "            kSecMatchLimit as String: kSecMatchLimitAll,\n" ++
+    "        ],\n" ++
     "        [\n" ++
     "            kSecClass as String: kSecClassKey,\n" ++
     "            kSecAttrLabel as String: label,\n" ++
@@ -1584,13 +1607,25 @@ const macos_secure_enclave_helper_script =
     "            fail(\"SecItemCopyMatching CTK key failed: \\(status)\", reason: reasonForStatus(status))\n" ++
     "        }\n" ++
     "\n" ++
-    "        let keys: [SecKey]\n" ++
+    "        var keys: [SecKey] = []\n" ++
     "        if let many = item as? [SecKey] {\n" ++
     "            keys = many\n" ++
-    "        } else if let one = item as! SecKey? {\n" ++
+    "        } else if let one = item as? SecKey {\n" ++
     "            keys = [one]\n" ++
+    "        } else if let manyIdentities = item as? [SecIdentity] {\n" ++
+    "            keys = manyIdentities.compactMap { identity in\n" ++
+    "                var key: SecKey?\n" ++
+    "                let copyStatus = SecIdentityCopyPrivateKey(identity, &key)\n" ++
+    "                debugLog(\"findCtkPrivateKey SecIdentityCopyPrivateKey status=\\(copyStatus)\")\n" ++
+    "                return copyStatus == errSecSuccess ? key : nil\n" ++
+    "            }\n" ++
+    "        } else if let oneIdentity = item as? SecIdentity {\n" ++
+    "            var key: SecKey?\n" ++
+    "            let copyStatus = SecIdentityCopyPrivateKey(oneIdentity, &key)\n" ++
+    "            debugLog(\"findCtkPrivateKey SecIdentityCopyPrivateKey status=\\(copyStatus)\")\n" ++
+    "            if copyStatus == errSecSuccess, let key { keys = [key] }\n" ++
     "        } else {\n" ++
-    "            fail(\"CTK key lookup returned unexpected result\", reason: \"unavailable\")\n" ++
+    "            fail(\"CTK key lookup returned unexpected result type=\\(type(of: item as Any))\", reason: \"unavailable\")\n" ++
     "        }\n" ++
     "\n" ++
     "        debugLog(\"findCtkPrivateKey query#\\(queryIndex + 1) candidateCount=\\(keys.count)\")\n" ++
