@@ -1610,13 +1610,17 @@ const macos_secure_enclave_helper_script =
     "func loadCtkPrivateKey(label: String, expectedPublicKeyHash: String? = nil, retries: Int = 20, retryDelaySeconds: Double = 0.1) -> SecKey {\n" ++
     "    for attempt in 0...max(0, retries) {\n" ++
     "        if let key = findCtkPrivateKey(label: label, expectedPublicKeyHash: expectedPublicKeyHash) {\n" ++
+    "            debugLog(\"loadCtkPrivateKey success attempt=\\(attempt + 1) label=\\(label) expectedHash=\\(expectedPublicKeyHash ?? \"<none>\")\")\n" ++
     "            return key\n" ++
     "        }\n" ++
     "        if attempt < retries {\n" ++
     "            Thread.sleep(forTimeInterval: retryDelaySeconds)\n" ++
     "        }\n" ++
     "    }\n" ++
-    "    fail(\"CTK key not found for label \\(label)\", reason: \"key_missing\")\n" ++
+    "    let identities = parseCtkIdentities(runScAuth([\"list-ctk-identities\"]))\n" ++
+    "    let matching = identities.filter { $0[\"label\"] == label }\n" ++
+    "    let hashes = matching.compactMap { $0[\"public_key_hash\"] }.joined(separator: \",\")\n" ++
+    "    fail(\"CTK key not found for label \\(label); expectedHash=\\(expectedPublicKeyHash ?? \"<none>\"); listedCount=\\(matching.count); listedHashes=[\\(hashes)]\", reason: \"key_missing\")\n" ++
     "}\n" ++
     "func loadWrapMaterial(tag: String) -> Data? {\n" ++
     "    let query: [String: Any] = [\n" ++
@@ -1838,10 +1842,16 @@ const macos_secure_enclave_helper_script =
     "case \"load-ctk\":\n" ++
     "    if args.count != 5 { fail(\"usage: load-ctk <label> <public-key-hash> <ephemeral-pub-b64>\") }\n" ++
     "    debugLog(\"load-ctk start label=\\(args[2]) publicKeyHash=\\(args[3]) ephemeralPubB64Length=\\(args[4].count)\")\n" ++
+    "    let identities = parseCtkIdentities(runScAuth([\"list-ctk-identities\"]))\n" ++
+    "    let matching = identities.filter { $0[\"label\"] == args[2] }\n" ++
+    "    debugLog(\"load-ctk identitiesForLabel=\\(matching.count) hashes=\\(matching.compactMap { $0[\"public_key_hash\"] }.joined(separator: \",\"))\")\n" ++
     "    guard let ephemeralPub = Data(base64Encoded: args[4]) else { fail(\"invalid ephemeral public key base64\") }\n" ++
     "    debugLog(\"load-ctk decoded ephemeral public key bytes=\\(ephemeralPub.count)\")\n" ++
     "    let enclaveKey = loadCtkPrivateKey(label: args[2], expectedPublicKeyHash: args[3])\n" ++
     "    debugLog(\"load-ctk CTK private key loaded\")\n" ++
+    "    guard let derivedPublicKey = SecKeyCopyPublicKey(enclaveKey) else { fail(\"load-ctk loaded key missing public key\") }\n" ++
+    "    let derivedHash = publicKeyHashHex(derivedPublicKey)\n" ++
+    "    debugLog(\"load-ctk loaded key public hash=\\(derivedHash)\")\n" ++
     "    let secret: Data\n" ++
     "    if let stored = loadWrapMaterial(tag: args[2]) {\n" ++
     "        debugLog(\"load-ctk found stored wrap material bytes=\\(stored.count)\")\n" ++
