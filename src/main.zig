@@ -1616,14 +1616,25 @@ const macos_secure_enclave_helper_script =
     "        }\n" ++
     "\n" ++
     "        debugLog(\"findCtkPrivateKey query#\\(queryIndex + 1) candidateCount=\\(keys.count)\")\n" ++
+    "        var matchingKeys: [SecKey] = []\n" ++
     "        for key in keys {\n" ++
     "            guard let publicKey = SecKeyCopyPublicKey(key) else { continue }\n" ++
     "            let hash = publicKeyHashHex(publicKey)\n" ++
     "            debugLog(\"findCtkPrivateKey candidate hash=\\(hash)\")\n" ++
-    "            if let expectedPublicKeyHash, hash.caseInsensitiveCompare(expectedPublicKeyHash) != ComparisonResult.orderedSame {\n" ++
-    "                debugLog(\"findCtkPrivateKey candidate hash mismatched expected sc_auth hash, accepting label-scoped key anyway\")\n" ++
+    "            if let expectedPublicKeyHash {\n" ++
+    "                if hash.caseInsensitiveCompare(expectedPublicKeyHash) == ComparisonResult.orderedSame {\n" ++
+    "                    debugLog(\"findCtkPrivateKey matched candidate hash=\\(hash) via query#\\(queryIndex + 1)\")\n" ++
+    "                    matchingKeys.append(key)\n" ++
+    "                } else {\n" ++
+    "                    debugLog(\"findCtkPrivateKey candidate hash mismatched expected sc_auth hash\")\n" ++
+    "                }\n" ++
+    "            } else {\n" ++
+    "                debugLog(\"findCtkPrivateKey matched candidate hash=\\(hash) via query#\\(queryIndex + 1)\")\n" ++
+    "                matchingKeys.append(key)\n" ++
     "            }\n" ++
-    "            debugLog(\"findCtkPrivateKey matched candidate hash=\\(hash) via query#\\(queryIndex + 1)\")\n" ++
+    "        }\n" ++
+    "        if !matchingKeys.isEmpty {\n" ++
+    "            return matchingKeys\n" ++
     "        }\n" ++
     "    }\n" ++
     "    return []\n" ++
@@ -1885,8 +1896,8 @@ const macos_secure_enclave_helper_script =
     "        fail(\"created CTK identity not found after sc_auth create\")\n" ++
     "    }\n" ++
     "    debugLog(\"create-ctk-wrap matched label=\\(label) publicKeyHash=\\(publicKeyHash)\")\n" ++
-    "    let enclaveKey = loadCtkPrivateKey(label: label)\n" ++
-    "    debugLog(\"create-ctk-wrap CTK private key loaded (label-only bootstrap path)\")\n" ++
+    "    let enclaveKey = loadCtkPrivateKey(label: label, expectedPublicKeyHash: publicKeyHash)\n" ++
+    "    debugLog(\"create-ctk-wrap CTK private key loaded\")\n" ++
     "    let ephemeralPrivate = createEphemeralPrivateKey()\n" ++
     "    let ephemeralPubB64 = publicKeyData(ephemeralPrivate).base64EncodedString()\n" ++
     "    debugLog(\"create-ctk-wrap ephemeral key generated pubB64Length=\\(ephemeralPubB64.count)\")\n" ++
