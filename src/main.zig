@@ -1877,36 +1877,12 @@ const macos_secure_enclave_helper_script =
     "    debugLog(\"load-ctk loaded key public hash=\\(derivedHash)\")\n" ++
     "    let secret: Data\n" ++
     "    if let stored = loadWrapMaterial(tag: args[2]) {\n" ++
-    "        debugLog(\"load-ctk found stored wrap material bytes=\\(stored.count)\")\n" ++
-    "        let raw: Any\n" ++
-    "        do {\n" ++
-    "            raw = try JSONSerialization.jsonObject(with: stored, options: [])\n" ++
-    "        } catch {\n" ++
-    "            fail(\"wrap material JSON is invalid: \\(error)\")\n" ++
-    "        }\n" ++
-    "        guard let payload = raw as? [String: Any] else {\n" ++
-    "            fail(\"wrap material JSON is invalid\")\n" ++
-    "        }\n" ++
-    "        if let storedEphemeral = payload[\"ephemeral_pub_b64\"] as? String, storedEphemeral != args[4] {\n" ++
-    "            fail(\"stored wrap material does not match wrapped-key metadata\")\n" ++
-    "        }\n" ++
-    "        debugLog(\"load-ctk deriving wrap key from stored material\")\n" ++
-    "        do {\n" ++
-    "            secret = try { () -> Data in\n" ++
-    "                let key = wrapKey(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))\n" ++
-    "                return openWrapMaterial(payload: payload, key: key)\n" ++
-    "            }()\n" ++
-    "            debugLog(\"load-ctk unwrapped stored material successfully\")\n" ++
-    "        } catch {\n" ++
-    "            debugLog(\"load-ctk stored wrap path failed, falling back to raw shared secret: \\(error)\")\n" ++
-    "            secret = sharedSecret(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))\n" ++
-    "            debugLog(\"load-ctk derived shared secret successfully after fallback\")\n" ++
-    "        }\n" ++
+    "        debugLog(\"load-ctk found stored wrap material bytes=\\(stored.count), but CTK load ignores stored wrap path\")\n" ++
     "    } else {\n" ++
     "        debugLog(\"load-ctk no stored wrap material, using raw shared secret path\")\n" ++
-    "        secret = sharedSecret(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))\n" ++
-    "        debugLog(\"load-ctk derived shared secret successfully\")\n" ++
     "    }\n" ++
+    "    secret = sharedSecret(privateKey: enclaveKey, publicKey: publicKeyFromData(ephemeralPub))\n" ++
+    "    debugLog(\"load-ctk derived shared secret successfully\")\n" ++
     "    emit([\n" ++
     "        \"secret_b64\": secret.base64EncodedString(),\n" ++
     "        \"secret_ref\": \"macos-ctk-secure-enclave:label=\\(args[2]);hash=\\(args[3])\",\n" ++
