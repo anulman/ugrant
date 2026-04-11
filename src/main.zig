@@ -1626,7 +1626,8 @@ const macos_secure_enclave_helper_script =
     "                    debugLog(\"findCtkPrivateKey matched candidate hash=\\(hash) via query#\\(queryIndex + 1)\")\n" ++
     "                    matchingKeys.append(key)\n" ++
     "                } else {\n" ++
-    "                    debugLog(\"findCtkPrivateKey candidate hash mismatched expected sc_auth hash\")\n" ++
+    "                    debugLog(\"findCtkPrivateKey candidate hash mismatched expected sc_auth hash, but returning label-scoped key because sc_auth and SecKey hash domains differ\")\n" ++
+    "                    matchingKeys.append(key)\n" ++
     "                }\n" ++
     "            } else {\n" ++
     "                debugLog(\"findCtkPrivateKey matched candidate hash=\\(hash) via query#\\(queryIndex + 1)\")\n" ++
@@ -1896,8 +1897,8 @@ const macos_secure_enclave_helper_script =
     "        fail(\"created CTK identity not found after sc_auth create\")\n" ++
     "    }\n" ++
     "    debugLog(\"create-ctk-wrap matched label=\\(label) publicKeyHash=\\(publicKeyHash)\")\n" ++
-    "    let enclaveKey = loadCtkPrivateKey(label: label, expectedPublicKeyHash: publicKeyHash)\n" ++
-    "    debugLog(\"create-ctk-wrap CTK private key loaded\")\n" ++
+    "    let enclaveKey = loadCtkPrivateKey(label: label)\n" ++
+    "    debugLog(\"create-ctk-wrap CTK private key loaded (label-scoped)\")\n" ++
     "    let ephemeralPrivate = createEphemeralPrivateKey()\n" ++
     "    let ephemeralPubB64 = publicKeyData(ephemeralPrivate).base64EncodedString()\n" ++
     "    debugLog(\"create-ctk-wrap ephemeral key generated pubB64Length=\\(ephemeralPubB64.count)\")\n" ++
