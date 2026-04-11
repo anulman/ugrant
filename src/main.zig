@@ -1560,18 +1560,12 @@ const macos_secure_enclave_helper_script =
     "    let labelData = label.data(using: .utf8)!\n" ++
     "    let candidateQueries: [[String: Any]] = [\n" ++
     "        [\n" ++
-    "            kSecClass as String: kSecClassIdentity,\n" ++
-    "            kSecAttrLabel as String: label,\n" ++
-    "            kSecReturnRef as String: true,\n" ++
-    "            kSecMatchLimit as String: kSecMatchLimitAll,\n" ++
-    "        ],\n" ++
-    "        [\n" ++
     "            kSecClass as String: kSecClassKey,\n" ++
     "            kSecAttrApplicationTag as String: labelData,\n" ++
     "            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,\n" ++
     "            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
     "            kSecReturnRef as String: true,\n" ++
-    "            kSecMatchLimit as String: kSecMatchLimitAll,\n" ++
+    "            kSecMatchLimit as String: kSecMatchLimitOne,\n" ++
     "        ],\n" ++
     "        [\n" ++
     "            kSecClass as String: kSecClassKey,\n" ++
@@ -1579,7 +1573,7 @@ const macos_secure_enclave_helper_script =
     "            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,\n" ++
     "            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
     "            kSecReturnRef as String: true,\n" ++
-    "            kSecMatchLimit as String: kSecMatchLimitAll,\n" ++
+    "            kSecMatchLimit as String: kSecMatchLimitOne,\n" ++
     "        ],\n" ++
     "        [\n" ++
     "            kSecClass as String: kSecClassKey,\n" ++
@@ -1587,17 +1581,16 @@ const macos_secure_enclave_helper_script =
     "            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,\n" ++
     "            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
     "            kSecReturnRef as String: true,\n" ++
-    "            kSecMatchLimit as String: kSecMatchLimitAll,\n" ++
+    "            kSecMatchLimit as String: kSecMatchLimitOne,\n" ++
     "        ],\n" ++
     "        [\n" ++
     "            kSecClass as String: kSecClassKey,\n" ++
     "            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,\n" ++
     "            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,\n" ++
     "            kSecReturnRef as String: true,\n" ++
-    "            kSecMatchLimit as String: kSecMatchLimitAll,\n" ++
+    "            kSecMatchLimit as String: kSecMatchLimitOne,\n" ++
     "        ],\n" ++
     "    ]\n" ++
-    "\n" ++
     "    for (queryIndex, query) in candidateQueries.enumerated() {\n" ++
     "        var item: CFTypeRef?\n" ++
     "        let status = SecItemCopyMatching(query as CFDictionary, &item)\n" ++
@@ -1610,23 +1603,12 @@ const macos_secure_enclave_helper_script =
     "        var keys: [SecKey] = []\n" ++
     "        if let many = item as? [SecKey] {\n" ++
     "            keys = many\n" ++
-    "        } else if let manyIdentities = item as? [SecIdentity] {\n" ++
-    "            keys = manyIdentities.compactMap { identity in\n" ++
-    "                var key: SecKey?\n" ++
-    "                let copyStatus = SecIdentityCopyPrivateKey(identity, &key)\n" ++
-    "                debugLog(\"findCtkPrivateKey SecIdentityCopyPrivateKey status=\\(copyStatus)\")\n" ++
-    "                return copyStatus == errSecSuccess ? key : nil\n" ++
-    "            }\n" ++
     "        } else if let rawItem = item {\n" ++
     "            let typeId = CFGetTypeID(rawItem)\n" ++
     "            if typeId == SecKeyGetTypeID() {\n" ++
     "                keys = [unsafeBitCast(rawItem, to: SecKey.self)]\n" ++
     "            } else if typeId == SecIdentityGetTypeID() {\n" ++
-    "                let identity = unsafeBitCast(rawItem, to: SecIdentity.self)\n" ++
-    "                var key: SecKey?\n" ++
-    "                let copyStatus = SecIdentityCopyPrivateKey(identity, &key)\n" ++
-    "                debugLog(\"findCtkPrivateKey SecIdentityCopyPrivateKey status=\\(copyStatus)\")\n" ++
-    "                if copyStatus == errSecSuccess, let key { keys = [key] }\n" ++
+    "                debugLog(\"findCtkPrivateKey refusing broad SecIdentity result for safety\")\n" ++
     "            } else {\n" ++
     "                fail(\"CTK key lookup returned unexpected result typeId=\\(typeId)\", reason: \"unavailable\")\n" ++
     "            }\n" ++
