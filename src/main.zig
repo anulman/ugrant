@@ -1610,8 +1610,6 @@ const macos_secure_enclave_helper_script =
     "        var keys: [SecKey] = []\n" ++
     "        if let many = item as? [SecKey] {\n" ++
     "            keys = many\n" ++
-    "        } else if let one = item as? SecKey {\n" ++
-    "            keys = [one]\n" ++
     "        } else if let manyIdentities = item as? [SecIdentity] {\n" ++
     "            keys = manyIdentities.compactMap { identity in\n" ++
     "                var key: SecKey?\n" ++
@@ -1619,13 +1617,21 @@ const macos_secure_enclave_helper_script =
     "                debugLog(\"findCtkPrivateKey SecIdentityCopyPrivateKey status=\\(copyStatus)\")\n" ++
     "                return copyStatus == errSecSuccess ? key : nil\n" ++
     "            }\n" ++
-    "        } else if let oneIdentity = item as? SecIdentity {\n" ++
-    "            var key: SecKey?\n" ++
-    "            let copyStatus = SecIdentityCopyPrivateKey(oneIdentity, &key)\n" ++
-    "            debugLog(\"findCtkPrivateKey SecIdentityCopyPrivateKey status=\\(copyStatus)\")\n" ++
-    "            if copyStatus == errSecSuccess, let key { keys = [key] }\n" ++
+    "        } else if let rawItem = item {\n" ++
+    "            let typeId = CFGetTypeID(rawItem)\n" ++
+    "            if typeId == SecKeyGetTypeID() {\n" ++
+    "                keys = [unsafeBitCast(rawItem, to: SecKey.self)]\n" ++
+    "            } else if typeId == SecIdentityGetTypeID() {\n" ++
+    "                let identity = unsafeBitCast(rawItem, to: SecIdentity.self)\n" ++
+    "                var key: SecKey?\n" ++
+    "                let copyStatus = SecIdentityCopyPrivateKey(identity, &key)\n" ++
+    "                debugLog(\"findCtkPrivateKey SecIdentityCopyPrivateKey status=\\(copyStatus)\")\n" ++
+    "                if copyStatus == errSecSuccess, let key { keys = [key] }\n" ++
+    "            } else {\n" ++
+    "                fail(\"CTK key lookup returned unexpected result typeId=\\(typeId)\", reason: \"unavailable\")\n" ++
+    "            }\n" ++
     "        } else {\n" ++
-    "            fail(\"CTK key lookup returned unexpected result type=\\(type(of: item as Any))\", reason: \"unavailable\")\n" ++
+    "            fail(\"CTK key lookup returned no result object despite success\", reason: \"unavailable\")\n" ++
     "        }\n" ++
     "\n" ++
     "        debugLog(\"findCtkPrivateKey query#\\(queryIndex + 1) candidateCount=\\(keys.count)\")\n" ++
