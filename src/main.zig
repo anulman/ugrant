@@ -1699,19 +1699,31 @@ const macos_secure_enclave_helper_script =
     "    return context\n" ++
     "}\n" ++
     "func sharedSecret(privateKey: SecKey, publicKey: SecKey) -> Data {\n" ++
-    "    let algorithm = SecKeyAlgorithm.ecdhKeyExchangeStandard\n" ++
-    "    guard SecKeyIsAlgorithmSupported(privateKey, .keyExchange, algorithm) else {\n" ++
-    "        fail(\"ECDH key exchange is not supported for this key\", reason: \"unavailable\")\n" ++
-    "    }\n" ++
-    "    var error: Unmanaged<CFError>?\n" ++
+    "    let algorithms: [(String, SecKeyAlgorithm)] = [\n" ++
+    "        (\"ecdhKeyExchangeStandard\", .ecdhKeyExchangeStandard),\n" ++
+    "        (\"ecdhKeyExchangeCofactor\", .ecdhKeyExchangeCofactor),\n" ++
+    "        (\"ecdhKeyExchangeStandardX963SHA256\", .ecdhKeyExchangeStandardX963SHA256),\n" ++
+    "        (\"ecdhKeyExchangeCofactorX963SHA256\", .ecdhKeyExchangeCofactorX963SHA256),\n" ++
+    "    ]\n" ++
     "    let context = keyExchangeContext()\n" ++
-    "    let params = NSMutableDictionary()\n" ++
-    "    params[kSecUseAuthenticationContext] = context\n" ++
-    "    guard let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params, &error) as Data? else {\n" ++
+    "    for (name, algorithm) in algorithms {\n" ++
+    "        let supported = SecKeyIsAlgorithmSupported(privateKey, .keyExchange, algorithm)\n" ++
+    "        debugLog(\"sharedSecret algorithm=\\(name) supported=\\(supported)\")\n" ++
+    "        if !supported { continue }\n" ++
+    "        var error: Unmanaged<CFError>?\n" ++
+    "        let params = NSMutableDictionary()\n" ++
+    "        params[kSecUseAuthenticationContext] = context\n" ++
+    "        if name.contains(\"X963\") {\n" ++
+    "            params[kSecKeyKeyExchangeParameterRequestedSize] = 32\n" ++
+    "        }\n" ++
+    "        if let data = SecKeyCopyKeyExchangeResult(privateKey, algorithm, publicKey, params, &error) as Data? {\n" ++
+    "            debugLog(\"sharedSecret algorithm=\\(name) success bytes=\\(data.count)\")\n" ++
+    "            return data\n" ++
+    "        }\n" ++
     "        let failure = secError(error)\n" ++
-    "        fail(\"key exchange failed: \\(failure.message)\", reason: failure.reason)\n" ++
+    "        debugLog(\"sharedSecret algorithm=\\(name) failed message=\\(failure.message) reason=\\(failure.reason)\")\n" ++
     "    }\n" ++
-    "    return data\n" ++
+    "    fail(\"key exchange failed for all supported algorithms\", reason: \"unavailable\")\n" ++
     "}\n" ++
     "func wrapKey(privateKey: SecKey, publicKey: SecKey) -> SymmetricKey {\n" ++
     "    let secret = sharedSecret(privateKey: privateKey, publicKey: publicKey)\n" ++
