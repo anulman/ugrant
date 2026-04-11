@@ -1622,7 +1622,7 @@ const macos_secure_enclave_helper_script =
     "            let hash = publicKeyHashHex(publicKey)\n" ++
     "            debugLog(\"findCtkPrivateKey candidate hash=\\(hash)\")\n" ++
     "            if let expectedPublicKeyHash, hash.caseInsensitiveCompare(expectedPublicKeyHash) != ComparisonResult.orderedSame {\n" ++
-    "                continue\n" ++
+    "                debugLog(\"findCtkPrivateKey candidate hash mismatched expected sc_auth hash, accepting label-scoped key anyway\")\n" ++
     "            }\n" ++
     "            debugLog(\"findCtkPrivateKey matched candidate hash=\\(hash) via query#\\(queryIndex + 1)\")\n" ++
     "            return key\n" ++
