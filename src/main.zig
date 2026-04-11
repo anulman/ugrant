@@ -1847,6 +1847,12 @@ const macos_secure_enclave_helper_script =
     "        ]\n" ++
     "    }\n" ++
     "}\n" ++
+    "func newestMatchingIdentity(label: String, protection: String, identities: [[String: String]]) -> [String: String]? {\n" ++
+    "    let matching = identities.enumerated().filter { _, item in\n" ++
+    "        item[\"label\"] == label && item[\"protection\"] == protection\n" ++
+    "    }\n" ++
+    "    return matching.last?.element\n" ++
+    "}\n" ++
     "let args = CommandLine.arguments\n" ++
     "if args.count < 2 { fail(\"missing mode\") }\n" ++
     "switch args[1] {\n" ++
@@ -1857,7 +1863,7 @@ const macos_secure_enclave_helper_script =
     "    let protection = requireUserPresence ? \"bio\" : \"none\"\n" ++
     "    _ = runScAuth([\"create-ctk-identity\", \"-l\", label, \"-k\", \"p-256\", \"-t\", protection])\n" ++
     "    let identities = parseCtkIdentities(runScAuth([\"list-ctk-identities\"]))\n" ++
-    "    guard let match = identities.first(where: { $0[\"label\"] == label }) else {\n" ++
+    "    guard let match = newestMatchingIdentity(label: label, protection: protection, identities: identities) else {\n" ++
     "        fail(\"created CTK identity not found after sc_auth create\")\n" ++
     "    }\n" ++
     "    emit([\n" ++
@@ -1876,7 +1882,7 @@ const macos_secure_enclave_helper_script =
     "    debugLog(\"create-ctk-wrap identity created, listing identities\")\n" ++
     "    let identities = parseCtkIdentities(runScAuth([\"list-ctk-identities\"]))\n" ++
     "    debugLog(\"create-ctk-wrap identities count=\\(identities.count)\")\n" ++
-    "    guard let match = identities.first(where: { $0[\"label\"] == label }), let publicKeyHash = match[\"public_key_hash\"], !publicKeyHash.isEmpty else {\n" ++
+    "    guard let match = newestMatchingIdentity(label: label, protection: protection, identities: identities), let publicKeyHash = match[\"public_key_hash\"], !publicKeyHash.isEmpty else {\n" ++
     "        fail(\"created CTK identity not found after sc_auth create\")\n" ++
     "    }\n" ++
     "    debugLog(\"create-ctk-wrap matched label=\\(label) publicKeyHash=\\(publicKeyHash)\")\n" ++
